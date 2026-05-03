@@ -1,12 +1,13 @@
 import os
 from pathlib import Path
 from typing import Iterator
+
 from .models import FileObservation
 
 
 def scan_directory(path: str) -> Iterator[FileObservation]:
     root_path = Path(path).resolve()
-    for dirpath, dirnames, filenames in os.walk(root_path, followlinks=False):
+    for dirpath, _, filenames in os.walk(root_path, followlinks=False):
         for filename in filenames:
             file_path = Path(dirpath) / filename
             if file_path.is_symlink():

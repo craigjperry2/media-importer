@@ -1,6 +1,8 @@
-import sqlite3
 import os
+import sqlite3
+from collections.abc import Callable
 from typing import List, Optional
+
 from .models import Blob, FileObservation
 
 
@@ -99,7 +101,7 @@ class Catalog:
 
     def get_all_blobs(self) -> List[Blob]:
         cursor = self.conn.execute("SELECT * FROM blobs")
-        blobs = []
+        blobs: list[Blob] = []
         for row in cursor:
             blobs.append(
                 Blob(
@@ -111,7 +113,9 @@ class Catalog:
             )
         return blobs
 
-    def execute_in_transaction(self, func):
+    def execute_in_transaction(
+        self, func: Callable[[sqlite3.Connection], None]
+    ) -> None:
         try:
             self.conn.execute("BEGIN TRANSACTION")
             func(self.conn)
