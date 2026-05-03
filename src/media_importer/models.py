@@ -1,12 +1,14 @@
 from dataclasses import dataclass
 from typing import Optional
 
+
 @dataclass
 class Blob:
     file_hash: str
     size_bytes: int
     store_path: str
     first_seen_at: float
+
 
 @dataclass
 class FileObservation:
@@ -18,9 +20,11 @@ class FileObservation:
     file_hash: Optional[str]
     last_seen_at: float
 
+
 @dataclass
 class Action:
     pass
+
 
 @dataclass
 class CopyFileAction(Action):
@@ -29,13 +33,16 @@ class CopyFileAction(Action):
     file_hash: str
     size_bytes: int
 
+
 @dataclass
 class InsertObservationAction(Action):
     observation: FileObservation
 
+
 @dataclass
 class MarkStaleAction(Action):
     file_path: str
+
 
 @dataclass
 class AddBlobAction(Action):

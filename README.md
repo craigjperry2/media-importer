@@ -40,15 +40,12 @@ nix develop
 
 In both cases the `shellHook` runs `uv sync --dev` to create `.venv/` and install dependencies, then activates the virtualenv. Subsequent entries are fast because `uv` is incremental.
 
-**Option C — without nix (not recommended):** You are responsible for providing a suitable uv and python version (NB: uv can provide the python version), and optionally direnv. You can then manually create the venv and sync the dependencies:
+**Option C — without nix (not recommended):** You are responsible for providing a suitable uv and python version (NB: uv can provide the python version). You can then manually create the venv, sync the dependencies, and install the pre-commit hook:
 
 ```sh
-# EITHER without direnv
 uv sync --dev
 source .venv/bin/activate
-
-# OR with direnv
-direnv allow
+prek install
 ```
 
 ### Running the app

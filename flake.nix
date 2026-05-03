@@ -25,6 +25,7 @@
               export UV_PYTHON_PREFERENCE=only-system
               uv sync --dev
               source .venv/bin/activate
+              prek install
             '';
           };
         }

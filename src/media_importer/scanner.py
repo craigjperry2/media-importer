@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Iterator
 from .models import FileObservation
 
+
 def scan_directory(path: str) -> Iterator[FileObservation]:
     root_path = Path(path).resolve()
     for dirpath, dirnames, filenames in os.walk(root_path, followlinks=False):
@@ -10,7 +11,7 @@ def scan_directory(path: str) -> Iterator[FileObservation]:
             file_path = Path(dirpath) / filename
             if file_path.is_symlink():
                 continue
-            
+
             try:
                 stat = file_path.stat()
             except OSError:
@@ -23,5 +24,5 @@ def scan_directory(path: str) -> Iterator[FileObservation]:
                 size_bytes=stat.st_size,
                 mtime=stat.st_mtime,
                 file_hash=None,
-                last_seen_at=0.0
+                last_seen_at=0.0,
             )
