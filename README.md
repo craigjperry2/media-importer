@@ -68,6 +68,8 @@ media-importer scan \
   --source /path/to/source2
 ```
 
+During `scan`, the CLI reports count-based progress as it walks sources, plans work, and processes file copies so long-running runs stay visible.
+
 Use `--dry-run` to observe planned changes without writing to disk or database:
 ```sh
 media-importer scan --store store --db catalog.db --source src_dir --dry-run

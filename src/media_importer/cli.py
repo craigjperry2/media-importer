@@ -2,13 +2,14 @@ import argparse
 import logging
 import sys
 import time
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from dataclasses import replace
-from typing import Iterable
 
 from .catalog import Catalog
-from .executor import Executor
+from .executor import ExecutionResult, Executor
 from .hashing import calculate_hash
-from .models import Action, FileObservation
+from .models import Action, CopyFileAction, FileObservation, InsertObservationAction
 from .planner import Planner
 from .scanner import scan_directory
 
@@ -16,6 +17,100 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 _DB_HELP = "Path to SQLite database"
 _SCAN_BATCH_BYTES = 256 * 1024 * 1024
+_SCAN_PROGRESS_EVERY = 100
+_COPY_PROGRESS_EVERY = 25
+
+
+@dataclass
+class ScanProgress:
+    processed_files: int = 0
+    skipped_files: int = 0
+    planned_actions: int = 0
+    new_files_to_copy: int = 0
+    observations_to_record: int = 0
+
+
+class ScanProgressReporter:
+    def __init__(
+        self,
+        plan_progress_every: int = _SCAN_PROGRESS_EVERY,
+        copy_progress_every: int = _COPY_PROGRESS_EVERY,
+    ):
+        self.plan_progress_every = plan_progress_every
+        self.copy_progress_every = copy_progress_every
+
+    def planning_started(self, sources: list[str], dry_run: bool) -> None:
+        mode = "dry-run planning" if dry_run else "scan"
+        self._emit(f"Starting {mode} across {len(sources)} source(s)")
+
+    def source_started(self, source: str) -> None:
+        self._emit(f"Scanning source: {source}")
+
+    def planning_progress(self, progress: ScanProgress) -> None:
+        if progress.processed_files % self.plan_progress_every != 0:
+            return
+        self._emit(f"Planning progress: {_format_progress(progress)}")
+
+    def planning_complete(self, progress: ScanProgress) -> None:
+        self._emit(f"Planning complete: {_format_progress(progress)}")
+
+    def execution_started(self) -> None:
+        self._emit("Executing scan batches")
+
+    def copy_progress(self, processed_copy_actions: int) -> None:
+        if processed_copy_actions % self.copy_progress_every != 0:
+            return
+        self._emit(
+            f"Execution progress: processed {processed_copy_actions} file copies"
+        )
+
+    def execution_complete(
+        self,
+        progress: ScanProgress,
+        processed_copy_actions: int,
+        result: ExecutionResult,
+    ) -> None:
+        if result.success:
+            self._emit(
+                f"Scan complete: {_format_progress(progress)}; copied "
+                f"{processed_copy_actions} new files"
+            )
+            return
+
+        self._emit(
+            f"Scan finished with errors: {_format_progress(progress)}; "
+            f"processed {processed_copy_actions} of {progress.new_files_to_copy} "
+            "file copies"
+        )
+
+    def dry_run_complete(self, progress: ScanProgress) -> None:
+        self._emit(f"Dry run complete: {_format_progress(progress)}")
+
+    def _emit(self, message: str) -> None:
+        print(message, file=sys.stderr)
+
+
+def _format_progress(progress: ScanProgress) -> str:
+    summary = (
+        f"{progress.processed_files} files processed, "
+        f"{progress.new_files_to_copy} new files to copy, "
+        f"{progress.observations_to_record} observations to record, "
+        f"{progress.planned_actions} planned actions"
+    )
+    if progress.skipped_files:
+        summary += f", {progress.skipped_files} skipped"
+    return summary
+
+
+def _count_scan_actions(actions: list[Action]) -> tuple[int, int]:
+    copy_actions = 0
+    observation_actions = 0
+    for action in actions:
+        if isinstance(action, CopyFileAction):
+            copy_actions += 1
+        elif isinstance(action, InsertObservationAction):
+            observation_actions += 1
+    return copy_actions, observation_actions
 
 
 def _resolve_observation_hash(
@@ -48,9 +143,12 @@ def _blob_exists(catalog: Catalog, file_hash: str, known_blob_hashes: set[str]) 
     return True
 
 
-def _iter_source_observations(sources: Iterable[str]) -> Iterable[FileObservation]:
+def _iter_source_observations(
+    sources: Iterable[str],
+) -> Iterator[tuple[str, FileObservation]]:
     for source in sources:
-        yield from scan_directory(source)
+        for observation in scan_directory(source):
+            yield source, observation
 
 
 def _plan_scan_actions(
@@ -58,24 +156,61 @@ def _plan_scan_actions(
     planner: Planner,
     sources: Iterable[str],
     rehash_all: bool = False,
+    reporter: ScanProgressReporter | None = None,
 ) -> list[Action]:
+    actions, _ = _plan_scan_actions_with_progress(
+        catalog,
+        planner,
+        sources,
+        rehash_all,
+        reporter=reporter,
+    )
+    return actions
+
+
+def _plan_scan_actions_with_progress(
+    catalog: Catalog,
+    planner: Planner,
+    sources: Iterable[str],
+    rehash_all: bool = False,
+    reporter: ScanProgressReporter | None = None,
+) -> tuple[list[Action], ScanProgress]:
     actions: list[Action] = []
     known_blob_hashes: set[str] = set()
+    progress = ScanProgress()
     now = time.time()
+    current_source: str | None = None
 
-    for obs in _iter_source_observations(sources):
+    for source, obs in _iter_source_observations(sources):
+        if reporter is not None and source != current_source:
+            reporter.source_started(source)
+            current_source = source
+
+        progress.processed_files += 1
         hashed_obs = _resolve_observation_hash(catalog, obs, rehash_all)
         if hashed_obs is None or hashed_obs.file_hash is None:
+            progress.skipped_files += 1
+            if reporter is not None:
+                reporter.planning_progress(progress)
             continue
 
         file_hash = hashed_obs.file_hash
         blob_exists = _blob_exists(catalog, file_hash, known_blob_hashes)
-        actions.extend(
-            planner.plan_observation(hashed_obs, blob_exists=blob_exists, now=now)
+        observation_actions = planner.plan_observation(
+            hashed_obs, blob_exists=blob_exists, now=now
         )
+        actions.extend(observation_actions)
+        copy_actions, insert_actions = _count_scan_actions(observation_actions)
+        progress.planned_actions += len(observation_actions)
+        progress.new_files_to_copy += copy_actions
+        progress.observations_to_record += insert_actions
         known_blob_hashes.add(file_hash)
+        if reporter is not None:
+            reporter.planning_progress(progress)
 
-    return actions
+    if reporter is not None:
+        reporter.planning_complete(progress)
+    return actions, progress
 
 
 def _execute_scan(
@@ -85,14 +220,25 @@ def _execute_scan(
     sources: Iterable[str],
     rehash_all: bool = False,
     max_batch_bytes: int = _SCAN_BATCH_BYTES,
-) -> bool:
-    success = True
+    reporter: ScanProgressReporter | None = None,
+) -> tuple[ExecutionResult, ScanProgress, int]:
     known_blob_hashes: set[str] = set()
     batch_blob_hashes: set[str] = set()
     batch_new_hashes: set[str] = set()
     batch_actions: list[Action] = []
     batch_bytes = 0
+    copy_actions_processed = 0
+    progress = ScanProgress()
     now = time.time()
+    current_source: str | None = None
+    db_committed = True
+    failed_hashes: set[str] = set()
+
+    def on_copy_processed() -> None:
+        nonlocal copy_actions_processed
+        copy_actions_processed += 1
+        if reporter is not None:
+            reporter.copy_progress(copy_actions_processed)
 
     def flush_batch() -> None:
         nonlocal \
@@ -100,57 +246,103 @@ def _execute_scan(
             batch_blob_hashes, \
             batch_new_hashes, \
             batch_bytes, \
-            success
+            db_committed
         if not batch_actions:
             return
 
-        result = executor.execute_with_result(batch_actions)
+        result = executor.execute_with_result(
+            batch_actions,
+            on_copy_processed=on_copy_processed,
+        )
         if result.db_committed:
             known_blob_hashes.update(batch_new_hashes - result.failed_hashes)
-        success = success and result.success
+        db_committed = db_committed and result.db_committed
+        failed_hashes.update(result.failed_hashes)
 
         batch_actions = []
         batch_blob_hashes = set()
         batch_new_hashes = set()
         batch_bytes = 0
 
-    for obs in _iter_source_observations(sources):
+    if reporter is not None:
+        reporter.execution_started()
+
+    for source, obs in _iter_source_observations(sources):
+        if reporter is not None and source != current_source:
+            reporter.source_started(source)
+            current_source = source
+
+        progress.processed_files += 1
         hashed_obs = _resolve_observation_hash(catalog, obs, rehash_all)
         if hashed_obs is None or hashed_obs.file_hash is None:
+            progress.skipped_files += 1
+            if reporter is not None:
+                reporter.planning_progress(progress)
             continue
 
         file_hash = hashed_obs.file_hash
         blob_exists = file_hash in batch_blob_hashes or _blob_exists(
             catalog, file_hash, known_blob_hashes
         )
-        batch_actions.extend(
-            planner.plan_observation(hashed_obs, blob_exists=blob_exists, now=now)
+        observation_actions = planner.plan_observation(
+            hashed_obs, blob_exists=blob_exists, now=now
         )
+        batch_actions.extend(observation_actions)
+        copy_actions, insert_actions = _count_scan_actions(observation_actions)
+        progress.planned_actions += len(observation_actions)
+        progress.new_files_to_copy += copy_actions
+        progress.observations_to_record += insert_actions
 
         if not blob_exists:
             batch_blob_hashes.add(file_hash)
             batch_new_hashes.add(file_hash)
 
         batch_bytes += obs.size_bytes
+        if reporter is not None:
+            reporter.planning_progress(progress)
         if batch_bytes >= max_batch_bytes:
             flush_batch()
 
     flush_batch()
-    return success
+    result = ExecutionResult(
+        failed_hashes=frozenset(failed_hashes),
+        db_committed=db_committed,
+    )
+    if reporter is not None:
+        reporter.planning_complete(progress)
+        reporter.execution_complete(progress, copy_actions_processed, result)
+    return result, progress, copy_actions_processed
 
 
 def _handle_scan(args: argparse.Namespace) -> None:
     catalog = Catalog(args.db, read_only=args.dry_run)
     planner = Planner(catalog, args.store)
+    reporter = ScanProgressReporter()
+    reporter.planning_started(args.source, dry_run=args.dry_run)
 
     if args.dry_run:
-        actions = _plan_scan_actions(catalog, planner, args.source, args.rehash_all)
+        actions, progress = _plan_scan_actions_with_progress(
+            catalog,
+            planner,
+            args.source,
+            args.rehash_all,
+            reporter=reporter,
+        )
+        reporter.dry_run_complete(progress)
         print(f"Dry run: Planned {len(actions)} actions.")
         for action in actions:
             print(action)
     else:
         executor = Executor(catalog, args.store)
-        if not _execute_scan(catalog, planner, executor, args.source, args.rehash_all):
+        result, _, _ = _execute_scan(
+            catalog,
+            planner,
+            executor,
+            args.source,
+            args.rehash_all,
+            reporter=reporter,
+        )
+        if not result.success:
             sys.exit(1)
 
 

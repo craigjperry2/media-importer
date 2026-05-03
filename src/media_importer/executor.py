@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import List, Set
 
@@ -32,7 +33,11 @@ class Executor:
         self.catalog = catalog
         self.store_dir = store_dir
 
-    def _copy_files(self, actions: List[Action]) -> Set[str]:
+    def _copy_files(
+        self,
+        actions: List[Action],
+        on_copy_processed: Callable[[], None] | None = None,
+    ) -> Set[str]:
         failed_hashes: Set[str] = set()
         for action in actions:
             if not isinstance(action, CopyFileAction):
@@ -50,6 +55,9 @@ class Executor:
                     f"Failed to copy {action.source_path} to {full_store_path}: {e}"
                 )
                 failed_hashes.add(action.file_hash)
+            finally:
+                if on_copy_processed is not None:
+                    on_copy_processed()
         return failed_hashes
 
     def _db_operations(
@@ -102,8 +110,12 @@ class Executor:
                     "DELETE FROM blobs WHERE store_path = ?", (action.file_path,)
                 )
 
-    def execute_with_result(self, actions: List[Action]) -> ExecutionResult:
-        failed_hashes = self._copy_files(actions)
+    def execute_with_result(
+        self,
+        actions: List[Action],
+        on_copy_processed: Callable[[], None] | None = None,
+    ) -> ExecutionResult:
+        failed_hashes = self._copy_files(actions, on_copy_processed=on_copy_processed)
         db_committed = False
         try:
             self.catalog.execute_in_transaction(
