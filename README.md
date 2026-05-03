@@ -73,6 +73,8 @@ Use `--dry-run` to observe planned changes without writing to disk or database:
 media-importer scan --store store --db catalog.db --source src_dir --dry-run
 ```
 
+Non-dry-run scans process files incrementally in bounded batches so newly hashed files are copied while they are still likely to be resident in the page cache. `--dry-run` still computes the full action list up front.
+
 ### Verifying Store State
 
 To find missing or unindexed files in the store:

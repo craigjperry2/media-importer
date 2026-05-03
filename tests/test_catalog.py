@@ -1,6 +1,7 @@
 import os
 
 from media_importer.catalog import Catalog
+from media_importer.cli import _plan_scan_actions
 from media_importer.planner import Planner
 
 
@@ -15,7 +16,7 @@ def test_dry_run_purity(workspace):
 
     catalog = Catalog(db_path, read_only=True)
     planner = Planner(catalog, store_dir)
-    actions = planner.plan_scan([source_dir])
+    actions = _plan_scan_actions(catalog, planner, [source_dir])
 
     assert len(actions) > 0
     assert not os.path.exists(db_path)

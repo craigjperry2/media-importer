@@ -1,6 +1,7 @@
 import os
 import time
-from typing import Iterable, List
+from dataclasses import replace
+from typing import List
 
 from .catalog import Catalog
 from .hashing import calculate_hash
@@ -21,61 +22,32 @@ class Planner:
         self.catalog = catalog
         self.store_dir = store_dir
 
-    def _process_observation(
-        self, obs: FileObservation, rehash_all: bool, now: float
-    ) -> List[Action] | None:
-        existing_obs = self.catalog.get_observation(obs.file_path)
-
-        file_hash: str | None
-        if (
-            existing_obs
-            and not rehash_all
-            and existing_obs.size_bytes == obs.size_bytes
-            and existing_obs.mtime == obs.mtime
-        ):
-            file_hash = existing_obs.file_hash
-        else:
-            try:
-                file_hash = calculate_hash(obs.file_path)
-            except OSError:
-                return None
-
+    def plan_observation(
+        self, obs: FileObservation, blob_exists: bool, now: float
+    ) -> List[Action]:
+        file_hash = obs.file_hash
         assert file_hash is not None
-        obs.file_hash = file_hash
-        obs.last_seen_at = now
-
+        observation = replace(obs, last_seen_at=now)
         actions: List[Action] = []
-        if not self.catalog.get_blob(file_hash):
+        if not blob_exists:
             shard = file_hash[:2]
-            store_path = os.path.join(shard, f"{file_hash}{obs.file_format}")
+            store_path = os.path.join(shard, f"{file_hash}{observation.file_format}")
             blob = Blob(
                 file_hash=file_hash,
-                size_bytes=obs.size_bytes,
+                size_bytes=observation.size_bytes,
                 store_path=store_path,
                 first_seen_at=now,
             )
             actions.append(AddBlobAction(blob=blob))
             actions.append(
                 CopyFileAction(
-                    source_path=obs.file_path,
+                    source_path=observation.file_path,
                     store_path=store_path,
                     file_hash=file_hash,
-                    size_bytes=obs.size_bytes,
+                    size_bytes=observation.size_bytes,
                 )
             )
-        actions.append(InsertObservationAction(observation=obs))
-        return actions
-
-    def plan_scan(
-        self, sources: Iterable[str], rehash_all: bool = False
-    ) -> List[Action]:
-        actions: List[Action] = []
-        now = time.time()
-        for source in sources:
-            for obs in scan_directory(source):
-                result = self._process_observation(obs, rehash_all, now)
-                if result is not None:
-                    actions.extend(result)
+        actions.append(InsertObservationAction(observation=observation))
         return actions
 
     def plan_verify_store(self) -> List[Action]:

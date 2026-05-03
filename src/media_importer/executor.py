@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 import sqlite3
+from dataclasses import dataclass
 from typing import List, Set
 
 from .catalog import Catalog
@@ -14,6 +15,16 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    failed_hashes: frozenset[str]
+    db_committed: bool
+
+    @property
+    def success(self) -> bool:
+        return self.db_committed and not self.failed_hashes
 
 
 class Executor:
@@ -62,6 +73,8 @@ class Executor:
                 )
             elif isinstance(action, InsertObservationAction):
                 obs = action.observation
+                if obs.file_hash in failed_hashes:
+                    continue
                 conn.execute(
                     """
                     INSERT INTO source_files (file_path, file_name, file_format, size_bytes, mtime, file_hash, last_seen_at)
@@ -89,14 +102,20 @@ class Executor:
                     "DELETE FROM blobs WHERE store_path = ?", (action.file_path,)
                 )
 
-    def execute(self, actions: List[Action]) -> bool:
+    def execute_with_result(self, actions: List[Action]) -> ExecutionResult:
         failed_hashes = self._copy_files(actions)
-        success = len(failed_hashes) == 0
+        db_committed = False
         try:
             self.catalog.execute_in_transaction(
                 lambda conn: self._db_operations(conn, actions, failed_hashes)
             )
+            db_committed = True
         except Exception as e:
             logger.error(f"Failed to update database: {e}")
-            success = False
-        return success
+        return ExecutionResult(
+            failed_hashes=frozenset(failed_hashes),
+            db_committed=db_committed,
+        )
+
+    def execute(self, actions: List[Action]) -> bool:
+        return self.execute_with_result(actions).success
