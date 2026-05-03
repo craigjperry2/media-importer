@@ -19,6 +19,7 @@
             packages = [
               pkgs.python313
               pkgs.prek
+              pkgs.ruff
               pkgs.uv
               pkgs.sqlite
             ];
@@ -26,9 +27,9 @@
               export UV_PYTHON_PREFERENCE=only-system
               uv sync --dev
               source .venv/bin/activate
-              # Prefer the Nix-provided binary because the wheel-installed one
-              # is not runnable on NixOS.
-              export PATH="${pkgs.prek}/bin:$PATH"
+              # Prefer Nix-provided native CLI tools because wheel-installed
+              # binaries are not runnable on NixOS.
+              export PATH="${pkgs.lib.makeBinPath [ pkgs.prek pkgs.ruff ]}:$PATH"
               prek install
             '';
           };

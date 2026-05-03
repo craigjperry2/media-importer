@@ -30,7 +30,7 @@ This tool uses a Nix Flake for fully reproducible dependencies and `uv` for Pyth
 direnv allow
 ```
 
-This drops you into a shell with Python 3.13, `uv`, a Nix-provided `prek`, and an activated `.venv` with all dependencies installed.
+This drops you into a shell with Python 3.13, `uv`, Nix-provided native CLI tools such as `prek` and `ruff`, and an activated `.venv` with all dependencies installed.
 
 **Option B — manual:**
 
@@ -38,7 +38,7 @@ This drops you into a shell with Python 3.13, `uv`, a Nix-provided `prek`, and a
 nix develop
 ```
 
-In both cases the `shellHook` runs `uv sync --dev` to create `.venv/` and install dependencies, then activates the virtualenv. The shell then prefers the Nix-provided `prek`, which keeps the setup working on both nix-darwin and NixOS. Subsequent entries are fast because `uv` is incremental.
+In both cases the `shellHook` runs `uv sync --dev` to create `.venv/` and install dependencies, then activates the virtualenv. The shell then prefers Nix-provided native CLI tools such as `prek` and `ruff`, which keeps the setup working on both nix-darwin and NixOS. Subsequent entries are fast because `uv` is incremental.
 
 **Option C — without nix (not recommended):** You are responsible for providing a suitable uv and python version (NB: uv can provide the python version). You can then manually create the venv, sync the dependencies, and install the pre-commit hook:
 
@@ -53,7 +53,7 @@ prek install
 With the venv active (either via direnv or after `nix develop`):
 
 ```sh
-python -m media_importer.cli --help
+media-importer --help
 ```
 
 ## Usage
@@ -61,7 +61,7 @@ python -m media_importer.cli --help
 ### Scanning and Consolidating
 
 ```sh
-python -m media_importer.cli scan \
+media-importer scan \
   --store /path/to/store \
   --db /path/to/catalog.db \
   --source /path/to/source1 \
@@ -70,21 +70,21 @@ python -m media_importer.cli scan \
 
 Use `--dry-run` to observe planned changes without writing to disk or database:
 ```sh
-python -m media_importer.cli scan --store store --db catalog.db --source src_dir --dry-run
+media-importer scan --store store --db catalog.db --source src_dir --dry-run
 ```
 
 ### Verifying Store State
 
 To find missing or unindexed files in the store:
 ```sh
-python -m media_importer.cli verify-store --store /path/to/store --db /path/to/catalog.db
+media-importer verify-store --store /path/to/store --db /path/to/catalog.db
 ```
 
 ### Querying the Catalog
 
 Search the database:
 ```sh
-python -m media_importer.cli query --db /path/to/catalog.db --ext .jpg --name "vacation"
+media-importer query --db /path/to/catalog.db --ext .jpg --name "vacation"
 ```
 
 ## Running Tests

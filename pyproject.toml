@@ -8,6 +8,9 @@ version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = []
 
+[project.scripts]
+media-importer = "media_importer.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
