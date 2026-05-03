@@ -18,6 +18,7 @@
           default = pkgs.mkShell {
             packages = [
               pkgs.python313
+              pkgs.prek
               pkgs.uv
               pkgs.sqlite
             ];
@@ -25,6 +26,9 @@
               export UV_PYTHON_PREFERENCE=only-system
               uv sync --dev
               source .venv/bin/activate
+              # Prefer the Nix-provided binary because the wheel-installed one
+              # is not runnable on NixOS.
+              export PATH="${pkgs.prek}/bin:$PATH"
               prek install
             '';
           };

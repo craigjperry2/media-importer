@@ -30,7 +30,7 @@ This tool uses a Nix Flake for fully reproducible dependencies and `uv` for Pyth
 direnv allow
 ```
 
-This drops you into a shell with Python 3.13, `uv`, and an activated `.venv` with all dependencies installed.
+This drops you into a shell with Python 3.13, `uv`, a Nix-provided `prek`, and an activated `.venv` with all dependencies installed.
 
 **Option B — manual:**
 
@@ -38,7 +38,7 @@ This drops you into a shell with Python 3.13, `uv`, and an activated `.venv` wit
 nix develop
 ```
 
-In both cases the `shellHook` runs `uv sync --dev` to create `.venv/` and install dependencies, then activates the virtualenv. Subsequent entries are fast because `uv` is incremental.
+In both cases the `shellHook` runs `uv sync --dev` to create `.venv/` and install dependencies, then activates the virtualenv. The shell then prefers the Nix-provided `prek`, which keeps the setup working on both nix-darwin and NixOS. Subsequent entries are fast because `uv` is incremental.
 
 **Option C — without nix (not recommended):** You are responsible for providing a suitable uv and python version (NB: uv can provide the python version). You can then manually create the venv, sync the dependencies, and install the pre-commit hook:
 
