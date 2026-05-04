@@ -1,32 +1,33 @@
 import os
 import sqlite3
 from collections.abc import Callable
+from pathlib import Path
 from typing import List, Optional
 
 from .models import Blob, FileObservation
 
 
 class Catalog:
+    
     def __init__(self, db_path: str, read_only: bool = False):
         self.db_path = db_path
+    
+        path = Path(db_path).resolve()
+        db_exists = path.exists()
+        use_in_memory = read_only and not db_exists
 
-        if read_only:
-            # When db does not exist and read_only is True, SQLite will raise an error with ?mode=ro.
-            # We can use an in-memory clone or simply allow opening. Let's use in-memory clone for safety if requested.
-            # Actually, `?mode=ro` URI requires the DB to exist. If it doesn't, we can just connect to :memory:
-            if not os.path.exists(db_path):
-                uri = "file::memory:?cache=shared"
-            else:
-                uri = f"file:{os.path.abspath(db_path)}?mode=ro"
+        if read_only and db_exists:
+            uri = f"file:{path}?mode=ro"
+        elif use_in_memory:
+            uri = "file::memory:?cache=shared"
         else:
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-            uri = f"file:{os.path.abspath(db_path)}"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            uri = f"file:{path}"
 
         self.conn = sqlite3.connect(uri, uri=True)
         self.conn.row_factory = sqlite3.Row
 
-        if not read_only or not os.path.exists(db_path):
+        if use_in_memory or not read_only:
             self._init_db()
 
     def _init_db(self):
@@ -69,49 +70,26 @@ class Catalog:
         self.conn.commit()
 
     def get_observation(self, file_path: str) -> Optional[FileObservation]:
-        cursor = self.conn.execute(
+        row = self.conn.execute(
             "SELECT * FROM source_files WHERE file_path = ?", (file_path,)
-        )
-        row = cursor.fetchone()
-        if row:
-            return FileObservation(
-                file_path=row["file_path"],
-                file_name=row["file_name"],
-                file_format=row["file_format"],
-                size_bytes=row["size_bytes"],
-                mtime=row["mtime"],
-                file_hash=row["file_hash"],
-                last_seen_at=row["last_seen_at"],
-            )
-        return None
+        ).fetchone()
+        return FileObservation(**dict(row)) if row else None
+
 
     def get_blob(self, file_hash: str) -> Optional[Blob]:
-        cursor = self.conn.execute(
+        row = self.conn.execute(
             "SELECT * FROM blobs WHERE file_hash = ?", (file_hash,)
-        )
-        row = cursor.fetchone()
-        if row:
-            return Blob(
-                file_hash=row["file_hash"],
-                size_bytes=row["size_bytes"],
-                store_path=row["store_path"],
-                first_seen_at=row["first_seen_at"],
-            )
-        return None
+        ).fetchone()
+        return Blob(**dict(row)) if row else None
 
     def get_all_blobs(self) -> List[Blob]:
         cursor = self.conn.execute("SELECT * FROM blobs")
-        blobs: list[Blob] = []
-        for row in cursor:
-            blobs.append(
-                Blob(
+        return [Blob(
                     file_hash=row["file_hash"],
                     size_bytes=row["size_bytes"],
                     store_path=row["store_path"],
                     first_seen_at=row["first_seen_at"],
-                )
-            )
-        return blobs
+                ) for row in cursor]
 
     def execute_in_transaction(
         self, func: Callable[[sqlite3.Connection], None]
