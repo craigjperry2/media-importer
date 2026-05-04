@@ -1,6 +1,6 @@
-import os
 import time
 from dataclasses import replace
+from pathlib import Path
 from typing import List
 
 from .catalog import Catalog
@@ -18,7 +18,7 @@ from .scanner import scan_directory
 
 
 class Planner:
-    def __init__(self, catalog: Catalog, store_dir: str):
+    def __init__(self, catalog: Catalog, store_dir: Path):
         self.catalog = catalog
         self.store_dir = store_dir
 
@@ -31,7 +31,7 @@ class Planner:
         actions: List[Action] = []
         if not blob_exists:
             shard = file_hash[:2]
-            store_path = os.path.join(shard, f"{file_hash}{observation.file_format}")
+            store_path = Path(shard) / f"{file_hash}{observation.file_format}"
             blob = Blob(
                 file_hash=file_hash,
                 size_bytes=observation.size_bytes,
@@ -55,31 +55,29 @@ class Planner:
         blobs = self.catalog.get_all_blobs()
 
         for blob in blobs:
-            full_path = os.path.join(self.store_dir, blob.store_path)
-            if not os.path.exists(full_path):
+            full_path = self.store_dir / blob.store_path
+            if not full_path.exists():
                 actions.append(MarkStaleAction(file_path=blob.store_path))
 
-        store_files: set[str] = set()
-        if os.path.exists(self.store_dir):
+        store_files: set[Path] = set()
+        if self.store_dir.exists():
             for obs in scan_directory(self.store_dir):
-                store_files.add(obs.file_path)
+                store_files.add(Path(obs.file_path).resolve())
 
-        indexed_files = {
-            os.path.normpath(os.path.join(self.store_dir, b.store_path)) for b in blobs
-        }
+        indexed_files = {(self.store_dir / b.store_path).resolve() for b in blobs}
         unindexed = store_files - indexed_files
 
         now = time.time()
         for unindexed_file in unindexed:
             try:
                 file_hash = calculate_hash(unindexed_file)
-                stat = os.stat(unindexed_file)
+                stat = unindexed_file.stat()
             except OSError:
                 continue
 
             existing_blob = self.catalog.get_blob(file_hash)
             if not existing_blob:
-                rel_path = os.path.relpath(unindexed_file, self.store_dir)
+                rel_path = unindexed_file.relative_to(self.store_dir)
                 blob = Blob(
                     file_hash=file_hash,
                     size_bytes=stat.st_size,

@@ -4,6 +4,7 @@ import shutil
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Set
 
 from .catalog import Catalog
@@ -29,7 +30,7 @@ class ExecutionResult:
 
 
 class Executor:
-    def __init__(self, catalog: Catalog, store_dir: str):
+    def __init__(self, catalog: Catalog, store_dir: Path):
         self.catalog = catalog
         self.store_dir = store_dir
 
@@ -42,14 +43,14 @@ class Executor:
         for action in actions:
             if not isinstance(action, CopyFileAction):
                 continue
-            full_store_path = os.path.join(self.store_dir, action.store_path)
+            full_store_path = self.store_dir / action.store_path
             try:
-                os.makedirs(os.path.dirname(full_store_path), exist_ok=True)
-                tmp_path = full_store_path + ".tmp"
+                full_store_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = Path(f"{full_store_path}.tmp")
                 shutil.copy2(action.source_path, tmp_path)
-                with open(tmp_path, "ab") as f:
+                with tmp_path.open("ab") as f:
                     os.fsync(f.fileno())
-                os.replace(tmp_path, full_store_path)
+                tmp_path.replace(full_store_path)
             except Exception as e:
                 logger.error(
                     f"Failed to copy {action.source_path} to {full_store_path}: {e}"
@@ -75,7 +76,7 @@ class Executor:
                     (
                         action.blob.file_hash,
                         action.blob.size_bytes,
-                        action.blob.store_path,
+                        str(action.blob.store_path),
                         action.blob.first_seen_at,
                     ),
                 )
@@ -96,7 +97,7 @@ class Executor:
                         last_seen_at=excluded.last_seen_at
                 """,
                     (
-                        obs.file_path,
+                        str(obs.file_path),
                         obs.file_name,
                         obs.file_format,
                         obs.size_bytes,
@@ -107,7 +108,7 @@ class Executor:
                 )
             elif isinstance(action, MarkStaleAction):
                 conn.execute(
-                    "DELETE FROM blobs WHERE store_path = ?", (action.file_path,)
+                    "DELETE FROM blobs WHERE store_path = ?", (str(action.file_path),)
                 )
 
     def execute_with_result(

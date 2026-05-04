@@ -1,21 +1,25 @@
-import os
+from pathlib import Path
 import sys
 
+from pytest import CaptureFixture, MonkeyPatch
+
 from media_importer.catalog import Catalog
-from media_importer.cli import _execute_scan, _plan_scan_actions, main
+from media_importer.cli import _execute_scan, _plan_scan_actions, main  # pyright: ignore[reportPrivateUsage]
 from media_importer.executor import Executor
 from media_importer.models import AddBlobAction, CopyFileAction, InsertObservationAction
 from media_importer.planner import Planner
 
 
-def test_scan_dry_run_reports_progress(workspace, monkeypatch, capsys):
-    store_dir = os.path.join(workspace, "store")
-    db_path = os.path.join(workspace, "db.sqlite")
-    source_dir = os.path.join(workspace, "source")
+def test_scan_dry_run_reports_progress(
+    workspace: Path, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
+) -> None:
+    store_dir = workspace / "store"
+    db_path = workspace / "db.sqlite"
+    source_dir = workspace / "source"
 
-    os.makedirs(source_dir)
+    source_dir.mkdir(parents=True)
     for name in ("one.txt", "two.txt"):
-        with open(os.path.join(source_dir, name), "w") as f:
+        with (source_dir / name).open("w") as f:
             f.write(name)
 
     monkeypatch.setattr(
@@ -25,11 +29,11 @@ def test_scan_dry_run_reports_progress(workspace, monkeypatch, capsys):
             "media-importer",
             "scan",
             "--store",
-            store_dir,
+            str(store_dir),
             "--db",
-            db_path,
+            str(db_path),
             "--source",
-            source_dir,
+            str(source_dir),
             "--dry-run",
         ],
     )
@@ -50,14 +54,16 @@ def test_scan_dry_run_reports_progress(workspace, monkeypatch, capsys):
     ) in captured.err
 
 
-def test_scan_reports_execution_progress(workspace, monkeypatch, capsys):
-    store_dir = os.path.join(workspace, "store")
-    db_path = os.path.join(workspace, "db.sqlite")
-    source_dir = os.path.join(workspace, "source")
+def test_scan_reports_execution_progress(
+    workspace: Path, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]
+) -> None:
+    store_dir = workspace / "store"
+    db_path = workspace / "db.sqlite"
+    source_dir = workspace / "source"
 
-    os.makedirs(source_dir)
+    source_dir.mkdir(parents=True)
     for index in range(26):
-        with open(os.path.join(source_dir, f"file-{index}.txt"), "w") as f:
+        with (source_dir / f"file-{index}.txt").open("w") as f:
             f.write(f"file {index}")
 
     monkeypatch.setattr(
@@ -67,11 +73,11 @@ def test_scan_reports_execution_progress(workspace, monkeypatch, capsys):
             "media-importer",
             "scan",
             "--store",
-            store_dir,
+            str(store_dir),
             "--db",
-            db_path,
+            str(db_path),
             "--source",
-            source_dir,
+            str(source_dir),
         ],
     )
 
@@ -93,15 +99,15 @@ def test_scan_reports_execution_progress(workspace, monkeypatch, capsys):
     ) in captured.err
 
 
-def test_plan_scan_actions_dedupes_duplicate_content(workspace):
-    store_dir = os.path.join(workspace, "store")
-    db_path = os.path.join(workspace, "db.sqlite")
-    source_dir = os.path.join(workspace, "source")
+def test_plan_scan_actions_dedupes_duplicate_content(workspace: Path) -> None:
+    store_dir = workspace / "store"
+    db_path = workspace / "db.sqlite"
+    source_dir = workspace / "source"
 
-    os.makedirs(source_dir)
-    with open(os.path.join(source_dir, "one.txt"), "w") as f:
+    source_dir.mkdir(parents=True)
+    with (source_dir / "one.txt").open("w") as f:
         f.write("same data")
-    with open(os.path.join(source_dir, "two.txt"), "w") as f:
+    with (source_dir / "two.txt").open("w") as f:
         f.write("same data")
 
     catalog = Catalog(db_path)
@@ -114,15 +120,15 @@ def test_plan_scan_actions_dedupes_duplicate_content(workspace):
     assert sum(isinstance(action, InsertObservationAction) for action in actions) == 2
 
 
-def test_execute_scan_batches_dedupe_across_batches(workspace):
-    store_dir = os.path.join(workspace, "store")
-    db_path = os.path.join(workspace, "db.sqlite")
-    source_dir = os.path.join(workspace, "source")
+def test_execute_scan_batches_dedupe_across_batches(workspace: Path) -> None:
+    store_dir = workspace / "store"
+    db_path = workspace / "db.sqlite"
+    source_dir = workspace / "source"
 
-    os.makedirs(source_dir)
-    with open(os.path.join(source_dir, "one.txt"), "w") as f:
+    source_dir.mkdir(parents=True)
+    with (source_dir / "one.txt").open("w") as f:
         f.write("same data")
-    with open(os.path.join(source_dir, "two.txt"), "w") as f:
+    with (source_dir / "two.txt").open("w") as f:
         f.write("same data")
 
     catalog = Catalog(db_path)

@@ -4,6 +4,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from .catalog import Catalog
 from .executor import ExecutionResult, Executor
@@ -38,11 +39,11 @@ class ScanProgressReporter:
         self.plan_progress_every = plan_progress_every
         self.copy_progress_every = copy_progress_every
 
-    def planning_started(self, sources: list[str], dry_run: bool) -> None:
+    def planning_started(self, sources: list[Path], dry_run: bool) -> None:
         mode = "dry-run planning" if dry_run else "scan"
         self._emit(f"Starting {mode} across {len(sources)} source(s)")
 
-    def source_started(self, source: str) -> None:
+    def source_started(self, source: Path) -> None:
         self._emit(f"Scanning source: {source}")
 
     def planning_progress(self, progress: ScanProgress) -> None:
@@ -143,8 +144,8 @@ def _blob_exists(catalog: Catalog, file_hash: str, known_blob_hashes: set[str]) 
 
 
 def _iter_source_observations(
-    sources: Iterable[str],
-) -> Iterator[tuple[str, FileObservation]]:
+    sources: Iterable[Path],
+) -> Iterator[tuple[Path, FileObservation]]:
     for source in sources:
         for observation in scan_directory(source):
             yield source, observation
@@ -216,7 +217,7 @@ def _add_obs_to_batch(
 def _plan_scan_actions_with_progress(
     catalog: Catalog,
     planner: Planner,
-    sources: Iterable[str],
+    sources: Iterable[Path],
     rehash_all: bool = False,
     reporter: ScanProgressReporter | None = None,
 ) -> tuple[list[Action], ScanProgress]:
@@ -224,7 +225,7 @@ def _plan_scan_actions_with_progress(
     known_blob_hashes: set[str] = set()
     progress = ScanProgress()
     now = time.time()
-    current_source: str | None = None
+    current_source: Path | None = None
 
     for source, obs in _iter_source_observations(sources):
         if reporter is not None and source != current_source:
@@ -261,7 +262,7 @@ def _plan_scan_actions_with_progress(
 def _plan_scan_actions(  # pyright: ignore[reportUnusedFunction] used in test_planner.py
     catalog: Catalog,
     planner: Planner,
-    sources: Iterable[str],
+    sources: Iterable[Path],
     rehash_all: bool = False,
     reporter: ScanProgressReporter | None = None,
 ) -> list[Action]:
@@ -279,7 +280,7 @@ def _execute_scan(
     catalog: Catalog,
     planner: Planner,
     executor: Executor,
-    sources: Iterable[str],
+    sources: Iterable[Path],
     rehash_all: bool = False,
     max_batch_bytes: int = _SCAN_BATCH_BYTES,
     reporter: ScanProgressReporter | None = None,
@@ -289,7 +290,7 @@ def _execute_scan(
     copy_actions_processed = 0
     progress = ScanProgress()
     now = time.time()
-    current_source: str | None = None
+    current_source: Path | None = None
     db_committed = True
     failed_hashes: set[str] = set()
 
@@ -402,10 +403,16 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scan_parser = subparsers.add_parser("scan")
-    scan_parser.add_argument("--store", required=True, help="Path to store directory")
-    scan_parser.add_argument("--db", required=True, help=_DB_HELP)
     scan_parser.add_argument(
-        "--source", required=True, action="append", help="Source directories to scan"
+        "--store", type=Path, required=True, help="Path to store directory"
+    )
+    scan_parser.add_argument("--db", type=Path, required=True, help=_DB_HELP)
+    scan_parser.add_argument(
+        "--source",
+        type=Path,
+        required=True,
+        action="append",
+        help="Source directories to scan",
     )
     scan_parser.add_argument(
         "--dry-run", action="store_true", help="Plan only, make no changes"
@@ -415,14 +422,16 @@ def main() -> None:
     )
 
     verify_parser = subparsers.add_parser("verify-store")
-    verify_parser.add_argument("--store", required=True, help="Path to store directory")
-    verify_parser.add_argument("--db", required=True, help=_DB_HELP)
+    verify_parser.add_argument(
+        "--store", type=Path, required=True, help="Path to store directory"
+    )
+    verify_parser.add_argument("--db", type=Path, required=True, help=_DB_HELP)
     verify_parser.add_argument(
         "--dry-run", action="store_true", help="Plan only, make no changes"
     )
 
     query_parser = subparsers.add_parser("query")
-    query_parser.add_argument("--db", required=True, help=_DB_HELP)
+    query_parser.add_argument("--db", type=Path, required=True, help=_DB_HELP)
     query_parser.add_argument("--ext", help="Filter by extension")
     query_parser.add_argument("--name", help="Filter by file name")
     query_parser.add_argument("--hash", help="Filter by file hash")

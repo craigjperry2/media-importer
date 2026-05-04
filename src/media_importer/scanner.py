@@ -1,15 +1,14 @@
-import os
 from pathlib import Path
 from typing import Iterator
 
 from .models import FileObservation
 
 
-def scan_directory(path: str) -> Iterator[FileObservation]:
-    root_path = Path(path).resolve()
-    for dirpath, _, filenames in os.walk(root_path, followlinks=False):
+def scan_directory(path: Path) -> Iterator[FileObservation]:
+    root_path = path.resolve()
+    for dirpath, _, filenames in root_path.walk(follow_symlinks=False):
         for filename in filenames:
-            file_path = Path(dirpath) / filename
+            file_path = dirpath / filename
             if file_path.is_symlink():
                 continue
 
@@ -19,7 +18,7 @@ def scan_directory(path: str) -> Iterator[FileObservation]:
                 continue
 
             yield FileObservation(
-                file_path=str(file_path),
+                file_path=file_path,
                 file_name=filename,
                 file_format=file_path.suffix.lower(),
                 size_bytes=stat.st_size,

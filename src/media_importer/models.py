@@ -1,18 +1,19 @@
 from dataclasses import dataclass
 from typing import Optional
+from pathlib import Path
 
 
 @dataclass
 class Blob:
     file_hash: str
     size_bytes: int
-    store_path: str
+    store_path: Path
     first_seen_at: float
 
 
 @dataclass
 class FileObservation:
-    file_path: str
+    file_path: Path
     file_name: str
     file_format: str
     size_bytes: int
@@ -28,8 +29,8 @@ class Action:
 
 @dataclass
 class CopyFileAction(Action):
-    source_path: str
-    store_path: str
+    source_path: Path
+    store_path: Path
     file_hash: str
     size_bytes: int
 
@@ -41,7 +42,7 @@ class InsertObservationAction(Action):
 
 @dataclass
 class MarkStaleAction(Action):
-    file_path: str
+    file_path: Path
 
 
 @dataclass

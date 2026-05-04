@@ -7,10 +7,8 @@ from .models import Blob, FileObservation
 
 
 class Catalog:
-    def __init__(self, db_path: str, read_only: bool = False):
-        self.db_path = db_path
-
-        path = Path(db_path).resolve()
+    def __init__(self, db_path: Path, read_only: bool = False):
+        path = db_path.resolve()
         db_exists = path.exists()
         use_in_memory = read_only and not db_exists
 
@@ -67,22 +65,47 @@ class Catalog:
 
         self.conn.commit()
 
-    def get_observation(self, file_path: str) -> Optional[FileObservation]:
+    def get_observation(self, file_path: Path) -> Optional[FileObservation]:
         row = self.conn.execute(
             "SELECT file_path, file_name, file_format, size_bytes, mtime, file_hash, last_seen_at FROM source_files WHERE file_path = ?",
-            (file_path,),
+            (str(file_path),),
         ).fetchone()
-        return FileObservation(**dict(row)) if row else None
+        if row is None:
+            return None
+        return FileObservation(
+            file_path=Path(row["file_path"]),
+            file_name=row["file_name"],
+            file_format=row["file_format"],
+            size_bytes=row["size_bytes"],
+            mtime=row["mtime"],
+            file_hash=row["file_hash"],
+            last_seen_at=row["last_seen_at"],
+        )
 
     def get_blob(self, file_hash: str) -> Optional[Blob]:
         row = self.conn.execute(
             "SELECT * FROM blobs WHERE file_hash = ?", (file_hash,)
         ).fetchone()
-        return Blob(**dict(row)) if row else None
+        if row is None:
+            return None
+        return Blob(
+            file_hash=row["file_hash"],
+            size_bytes=row["size_bytes"],
+            store_path=Path(row["store_path"]),
+            first_seen_at=row["first_seen_at"],
+        )
 
     def get_all_blobs(self) -> List[Blob]:
         cursor = self.conn.execute("SELECT * FROM blobs")
-        return [Blob(**dict(row)) for row in cursor]
+        return [
+            Blob(
+                file_hash=row["file_hash"],
+                size_bytes=row["size_bytes"],
+                store_path=Path(row["store_path"]),
+                first_seen_at=row["first_seen_at"],
+            )
+            for row in cursor
+        ]
 
     def execute_in_transaction(
         self, func: Callable[[sqlite3.Connection], None]
