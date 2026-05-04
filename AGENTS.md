@@ -3,7 +3,7 @@
 ## 🚀 Commands
 Execute these from the project root after entering the dev environment (`direnv allow` or `nix develop`).
 * **Test:** `pytest`
-* **Run CLI:** `python -m media_importer.cli` (e.g., `python -m media_importer.cli scan --store s/ --db db.sqlite --source src/`)
+* **Run CLI:** `media-importer` (e.g., `media-importer scan --store store-root/ --db db.sqlite --source src/`)
 * **Dry Run:** Add `--dry-run` to the CLI to preview actions without side-effects.
 
 ## 🧱 Boundaries (Dos and Don'ts)
