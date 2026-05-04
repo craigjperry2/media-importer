@@ -153,9 +153,9 @@ def _iter_source_observations(
 
 @dataclass
 class _ScanBatch:
-    actions: list[Action] = field(default_factory=list)
-    blob_hashes: set[str] = field(default_factory=set)
-    new_hashes: set[str] = field(default_factory=set)
+    actions: list[Action] = field(default_factory=list)  # pyright: ignore[reportUnknownVariableType]
+    blob_hashes: set[str] = field(default_factory=set)  # pyright: ignore[reportUnknownVariableType]
+    new_hashes: set[str] = field(default_factory=set)  # pyright: ignore[reportUnknownVariableType]
     bytes: int = 0
 
 
