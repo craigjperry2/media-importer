@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 from media_importer.catalog import Catalog
@@ -48,8 +49,8 @@ def test_plan_observation_is_pure(workspace: Path) -> None:
     expected_store_path = Path(file_hash[:2]) / f"{file_hash}.txt"
     assert add_blob_action.blob.store_path == expected_store_path
     assert copy_file_action.store_path == add_blob_action.blob.store_path
-    assert insert_observation_action.observation.last_seen_at == 123.0
-    assert obs.last_seen_at == 0.0
+    assert math.isclose(insert_observation_action.observation.last_seen_at, 123.0)
+    assert math.isclose(obs.last_seen_at, 0.0)
 
 
 def test_idempotency(workspace: Path) -> None:
