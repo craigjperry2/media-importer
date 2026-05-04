@@ -39,8 +39,8 @@ def test_partial_copy_failure_preserves_successful_rows(workspace):
     source_dir = os.path.join(workspace, "source")
 
     os.makedirs(source_dir)
-    good_path = os.path.join(source_dir, "good.txt")
-    bad_path = os.path.join(source_dir, "bad.txt")
+    good_path = os.path.realpath(os.path.join(source_dir, "good.txt"))
+    bad_path = os.path.realpath(os.path.join(source_dir, "bad.txt"))
     with open(good_path, "w") as f:
         f.write("good")
     with open(bad_path, "w") as f:

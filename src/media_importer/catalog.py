@@ -1,4 +1,3 @@
-import os
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
@@ -8,10 +7,9 @@ from .models import Blob, FileObservation
 
 
 class Catalog:
-    
     def __init__(self, db_path: str, read_only: bool = False):
         self.db_path = db_path
-    
+
         path = Path(db_path).resolve()
         db_exists = path.exists()
         use_in_memory = read_only and not db_exists
@@ -71,10 +69,10 @@ class Catalog:
 
     def get_observation(self, file_path: str) -> Optional[FileObservation]:
         row = self.conn.execute(
-            "SELECT * FROM source_files WHERE file_path = ?", (file_path,)
+            "SELECT file_path, file_name, file_format, size_bytes, mtime, file_hash, last_seen_at FROM source_files WHERE file_path = ?",
+            (file_path,),
         ).fetchone()
         return FileObservation(**dict(row)) if row else None
-
 
     def get_blob(self, file_hash: str) -> Optional[Blob]:
         row = self.conn.execute(
@@ -84,12 +82,7 @@ class Catalog:
 
     def get_all_blobs(self) -> List[Blob]:
         cursor = self.conn.execute("SELECT * FROM blobs")
-        return [Blob(
-                    file_hash=row["file_hash"],
-                    size_bytes=row["size_bytes"],
-                    store_path=row["store_path"],
-                    first_seen_at=row["first_seen_at"],
-                ) for row in cursor]
+        return [Blob(**dict(row)) for row in cursor]
 
     def execute_in_transaction(
         self, func: Callable[[sqlite3.Connection], None]
