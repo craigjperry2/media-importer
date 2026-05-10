@@ -79,7 +79,9 @@ class Executor:
     def _create_or_update_browse_symlink(
         self, action: CreateOrUpdateBrowseSymlinkAction
     ) -> None:
-        link_path = action.browse_root / action.browse_rel_path
+        link_path = self._resolve_browse_link_path(
+            action.browse_root, action.browse_rel_path
+        )
         target_path = action.target_store_path.resolve()
         link_path.parent.mkdir(parents=True, exist_ok=True)
         relative_target = Path(os.path.relpath(target_path, link_path.parent))
@@ -96,7 +98,9 @@ class Executor:
         link_path.symlink_to(relative_target)
 
     def _remove_browse_symlink(self, action: RemoveBrowseSymlinkAction) -> None:
-        link_path = action.browse_root / action.browse_rel_path
+        link_path = self._resolve_browse_link_path(
+            action.browse_root, action.browse_rel_path
+        )
         if link_path.is_symlink():
             link_path.unlink()
             self._prune_empty_browse_dirs(link_path.parent, action.browse_root)
@@ -104,6 +108,31 @@ class Executor:
             raise FileExistsError(
                 f"Refusing to remove non-symlink browse entry: {link_path}"
             )
+
+    def _resolve_browse_link_path(
+        self, browse_root: Path, browse_rel_path: Path
+    ) -> Path:
+        if browse_rel_path.is_absolute():
+            raise ValueError(
+                f"Unsafe browse_rel_path (must be relative): {browse_rel_path}"
+            )
+        if any(part == ".." for part in browse_rel_path.parts):
+            raise ValueError(
+                f"Unsafe browse_rel_path (must not contain '..'): {browse_rel_path}"
+            )
+
+        resolved_root = browse_root.resolve()
+        unresolved_link_path = resolved_root / browse_rel_path
+        resolved_parent = unresolved_link_path.parent.resolve(strict=False)
+        resolved_link_path = resolved_parent / unresolved_link_path.name
+        try:
+            resolved_link_path.relative_to(resolved_root)
+        except ValueError as e:
+            raise ValueError(
+                f"Unsafe browse_rel_path escapes browse_root: {browse_rel_path}"
+            ) from e
+
+        return resolved_link_path
 
     def _prune_empty_browse_dirs(self, path: Path, browse_root: Path) -> None:
         current = path
