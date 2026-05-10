@@ -378,7 +378,8 @@ This keeps dry-run honest and avoids modifying the filesystem.
    - browse path update planning
 
 6. **Verify-store browse cleanup**
-   - remove browse symlinks before blob deletion
+   - remove browse symlinks before blob deletion - this is a **hard** ordering
+     rule to avoid browse metadata vanishing before cleanup is planned/executed
 
 7. **README**
    - document `--browse-root`
