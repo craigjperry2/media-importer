@@ -568,3 +568,13 @@ media-importer scan --store store-root --browse-root browse --db db.sqlite --sou
 media-importer verify-store --store store-root --db db.sqlite
 media-importer query --db db.sqlite --ext .jpg --name vacation
 ```
+
+## Known Issues
+
+- 7-char suffix hash can result in collisions, this is unaddressed
+- Store paths include the lowercase extension, but blobs are keyed only by
+  `file_hash`. The spec does not define which extension wins when identical
+  bytes are first seen through different filenames such as .jpg and .jpeg
+- corruption detection of store blobs is not implemented, use ZFS filesystem
+- temp copy path example <dest>.tmp is unsafe for concurrent or retry scenarios
+  even with the run lock
