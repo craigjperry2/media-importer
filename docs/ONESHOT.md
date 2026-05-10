@@ -252,12 +252,18 @@ Behavior:
 
 Hash cache behavior:
 
-- Look up an existing observation by exact `file_path`.
+- For observations created by `scan`, store `file_path` as the resolved absolute
+  canonical path to the source file. Do not store the user-provided CLI spelling
+  or a path relative to the process working directory as `file_path`.
+- Look up an existing observation by exact canonical `file_path`.
 - If `--rehash-all` is false and existing `size_bytes` and `mtime` match the
   current file, reuse the stored `file_hash`.
 - Otherwise rehash the file.
 - Preserve existing browse metadata during rehash until the browse
   reconciliation phase computes the desired current metadata.
+- Use the same canonical `file_path` identity for hash-cache hits, observation
+  upserts, and stale-observation detection. Keep source-relative path spelling
+  only in `source_rel_path` and browse layout fields.
 
 Deduplication behavior:
 
