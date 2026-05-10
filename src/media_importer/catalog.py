@@ -49,9 +49,19 @@ class Catalog:
                 mtime REAL,
                 file_hash TEXT,
                 last_seen_at REAL,
+                source_root TEXT,
+                source_rel_path TEXT,
+                browse_root TEXT,
+                browse_rel_path TEXT,
                 FOREIGN KEY(file_hash) REFERENCES blobs(file_hash) ON DELETE CASCADE
             )
         """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS source_roots (
+                source_root TEXT PRIMARY KEY
+            )
+        """)
+        self._ensure_source_file_columns()
 
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_file_name ON source_files(file_name)"
@@ -65,13 +75,21 @@ class Catalog:
 
         self.conn.commit()
 
-    def get_observation(self, file_path: Path) -> Optional[FileObservation]:
-        row = self.conn.execute(
-            "SELECT file_path, file_name, file_format, size_bytes, mtime, file_hash, last_seen_at FROM source_files WHERE file_path = ?",
-            (str(file_path),),
-        ).fetchone()
-        if row is None:
-            return None
+    def _ensure_source_file_columns(self) -> None:
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(source_files)").fetchall()
+        }
+        for name in (
+            "source_root",
+            "source_rel_path",
+            "browse_root",
+            "browse_rel_path",
+        ):
+            if name not in columns:
+                self.conn.execute(f"ALTER TABLE source_files ADD COLUMN {name} TEXT")
+
+    def _row_to_observation(self, row: sqlite3.Row) -> FileObservation:
         return FileObservation(
             file_path=Path(row["file_path"]),
             file_name=row["file_name"],
@@ -80,7 +98,29 @@ class Catalog:
             mtime=row["mtime"],
             file_hash=row["file_hash"],
             last_seen_at=row["last_seen_at"],
+            source_root=Path(row["source_root"]) if row["source_root"] else None,
+            source_rel_path=Path(row["source_rel_path"])
+            if row["source_rel_path"]
+            else None,
+            browse_root=Path(row["browse_root"]) if row["browse_root"] else None,
+            browse_rel_path=Path(row["browse_rel_path"])
+            if row["browse_rel_path"]
+            else None,
         )
+
+    def get_observation(self, file_path: Path) -> Optional[FileObservation]:
+        row = self.conn.execute(
+            """
+            SELECT file_path, file_name, file_format, size_bytes, mtime, file_hash,
+                   last_seen_at, source_root, source_rel_path, browse_root,
+                   browse_rel_path
+            FROM source_files WHERE file_path = ?
+            """,
+            (str(file_path),),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_observation(row)
 
     def get_blob(self, file_hash: str) -> Optional[Blob]:
         row = self.conn.execute(
@@ -107,6 +147,57 @@ class Catalog:
             for row in cursor
         ]
 
+    def get_observations_for_hash(self, file_hash: str) -> list[FileObservation]:
+        cursor = self.conn.execute(
+            """
+            SELECT file_path, file_name, file_format, size_bytes, mtime, file_hash,
+                   last_seen_at, source_root, source_rel_path, browse_root,
+                   browse_rel_path
+            FROM source_files
+            WHERE file_hash = ?
+            """,
+            (file_hash,),
+        )
+        return [self._row_to_observation(row) for row in cursor]
+
+    def get_all_live_observations(self) -> list[FileObservation]:
+        cursor = self.conn.execute(
+            """
+            SELECT file_path, file_name, file_format, size_bytes, mtime, file_hash,
+                   last_seen_at, source_root, source_rel_path, browse_root,
+                   browse_rel_path
+            FROM source_files
+            WHERE file_hash IS NOT NULL
+            """
+        )
+        return [self._row_to_observation(row) for row in cursor]
+
+    def get_stale_observations(
+        self, source_roots: list[Path], last_seen_at: float
+    ) -> list[FileObservation]:
+        roots = [root.resolve() for root in source_roots]
+        stale: list[FileObservation] = []
+        for observation in self.get_all_live_observations():
+            if observation.last_seen_at >= last_seen_at:
+                continue
+            if any(
+                _is_relative_to(observation.file_path.resolve(), root) for root in roots
+            ):
+                stale.append(observation)
+        return stale
+
+    def get_source_roots(self) -> list[Path]:
+        source_file_rows = self.conn.execute(
+            "SELECT DISTINCT source_root FROM source_files WHERE source_root IS NOT NULL"
+        ).fetchall()
+        root_rows = self.conn.execute("SELECT source_root FROM source_roots").fetchall()
+        roots = {
+            Path(row["source_root"])
+            for row in [*source_file_rows, *root_rows]
+            if row["source_root"] is not None
+        }
+        return sorted(roots)
+
     def execute_in_transaction(
         self, func: Callable[[sqlite3.Connection], None]
     ) -> None:
@@ -120,3 +211,11 @@ class Catalog:
 
     def close(self):
         self.conn.close()
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
