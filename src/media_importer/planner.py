@@ -174,10 +174,7 @@ class Planner:
                 observation.source_rel_path, observation.file_hash
             )
             full_store_path = self.store_dir / _store_path_for_observation(observation)
-            if (
-                observation.browse_rel_path != desired_rel_path
-                or observation.browse_root != browse_root
-            ):
+            if observation.browse_rel_path != desired_rel_path:
                 if observation.browse_rel_path is not None:
                     actions.append(
                         RemoveBrowseSymlinkAction(
