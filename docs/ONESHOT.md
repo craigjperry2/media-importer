@@ -407,20 +407,24 @@ Optional flag:
 
 Behavior:
 
-1. For every cataloged blob, check whether `<store>/<store_path>` exists.
-2. If a cataloged blob file is missing:
+1. Acquire the catalog run lock in live mode before walking the store, removing
+   browse symlinks, or mutating catalog rows.
+2. For every cataloged blob, check whether `<store>/<store_path>` exists.
+3. If a cataloged blob file is missing:
    - plan removal of every browse symlink for observations referencing that hash
    - then delete the blob row from `blobs`
    - rely on `ON DELETE CASCADE` to remove referencing `source_files` rows
-3. Walk the store directory for regular non-symlink files.
-4. For every store file not indexed by a blob row:
+4. Walk the store directory for regular non-symlink files.
+5. For every store file not indexed by a blob row:
    - hash it
    - if no blob with that hash exists, add a blob row whose `store_path` is the
      file path relative to the store root
    - do not copy or move the file
-5. Skip unreadable/unhashable unindexed store files.
-6. In dry-run mode, print planned actions and perform no writes.
-7. In live mode, execute actions and exit non-zero on failure.
+6. Skip unreadable/unhashable unindexed store files.
+7. In dry-run mode, do not acquire the write lock; print planned actions and
+   perform no writes.
+8. In live mode, execute actions, refresh the run lock during long verification
+   runs, release the lock on normal completion, and exit non-zero on failure.
 
 `verify-store` does not accept `--browse-root`; it must use persisted
 `browse_root` and `browse_rel_path` metadata to remove broken browse symlinks.
