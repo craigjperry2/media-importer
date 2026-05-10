@@ -54,6 +54,7 @@ Recommended new `source_files` columns:
 
 - `source_root TEXT`
 - `source_rel_path TEXT`
+- `browse_root TEXT`
 - `browse_rel_path TEXT`
 
 Rationale:
@@ -61,6 +62,8 @@ Rationale:
 - `file_path` is already the stable key for an observation.
 - each observation needs to remember which source root it came from and what
   its natural source-relative path is
+- `browse_root` must be persisted so `verify-store` has the absolute path
+  required to remove broken symlinks without needing a `--browse-root` CLI argument.
 - `browse_rel_path` lets rescans remain stable and lets the planner compare
   desired vs current browse placement
 
@@ -73,18 +76,22 @@ construct it manually do not break:
 
 - `source_root: Path | None = None`
 - `source_rel_path: Path | None = None`
+- `browse_root: Path | None = None`
 - `browse_rel_path: Path | None = None`
 
 Add explicit action types for browse maintenance and stale source cleanup.
 Recommended actions:
 
 - `CreateOrUpdateBrowseSymlinkAction`
+  - `browse_root: Path`
   - `browse_rel_path: Path`
   - `target_store_path: Path`
 - `RemoveBrowseSymlinkAction`
+  - `browse_root: Path`
   - `browse_rel_path: Path`
 - `UpdateBrowsePathAction`
   - `file_path: Path`
+  - `browse_root: Path | None`
   - `browse_rel_path: Path | None`
 - `DeleteObservationAction`
   - `file_path: Path`
@@ -109,6 +116,7 @@ Update observation reads and writes so `FileObservation` round-trips:
 - `last_seen_at`
 - `source_root`
 - `source_rel_path`
+- `browse_root`
 - `browse_rel_path`
 
 Add catalog helpers for planner use. Recommended helpers:
@@ -298,7 +306,7 @@ Handle the new actions inside `_db_operations(...)`.
 Recommended SQL responsibilities:
 
 - `InsertObservationAction`: upsert the new metadata columns too
-- `UpdateBrowsePathAction`: update `browse_rel_path`
+- `UpdateBrowsePathAction`: update `browse_root` and `browse_rel_path`
 - `DeleteObservationAction`: delete from `source_files`
 - `MarkStaleAction`: continue deleting from `blobs`
 

@@ -29,9 +29,10 @@ files in the canonical hash-based store.
 1. Add an optional `--browse-root` argument to the `scan` command only. If
 omitted, behavior remains unchanged.
 2. Persist enough metadata to reconstruct and maintain browse links
-deterministically, most likely by extending `source_files` with source-root and
-source-relative browse path fields rather than creating a parallel ORM-like
-layer.
+deterministically, most likely by extending `source_files` with source-root,
+browse-root, and source-relative browse path fields rather than creating a
+parallel ORM-like layer. This ensures `verify-store` can clean up stale
+symlinks without requiring the user to pass `--browse-root`.
 3. Add explicit action types for browse-tree maintenance so dry-run output
 shows planned symlink work and all side-effects remain in `executor.py`.
 4. When browse mode is enabled, plan creation/update of symlinks pointing at
