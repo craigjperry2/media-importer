@@ -1,12 +1,17 @@
 # Browse functionality implementation guide
 
-This document is for the coding agent that will implement the optional browse tree feature described in `PLAN.md` and specified by `tests/test_browse_feature.py`.
+This document is for the coding agent that will implement the optional browse
+tree feature described in `PLAN.md` and specified by
+`tests/test_browse_feature.py`.
 
 ## Goal
 
-Add an optional `--browse-root` flag to `media-importer scan` that maintains a human-browseable tree of symlinks mirroring the source-relative paths of imported media while keeping the canonical store unchanged.
+Add an optional `--browse-root` flag to `media-importer scan` that maintains a
+human-browseable tree of symlinks mirroring the source-relative paths of
+imported media while keeping the canonical store unchanged.
 
-The real media files must continue to live only in the content-addressed store. The browse tree is just a symlink overlay.
+The real media files must continue to live only in the content-addressed store.
+The browse tree is just a symlink overlay.
 
 ## Acceptance criteria
 
@@ -17,26 +22,32 @@ The implementation is done when all of these pass without weakening the tests:
 
 The key required behaviors are:
 
-1. `scan --browse-root ...` creates source-relative symlinks that point to the canonical blob.
+1. `scan --browse-root ...` creates source-relative symlinks that point to the
+canonical blob.
 2. Re-running the same scan is idempotent.
 3. Path collisions are resolved as:
    - first file keeps `name.ext`
    - later collisions become `1_name.ext`, `2_name.ext`, etc.
-4. If a previously scanned source file disappears, its browse symlink is removed and empty browse directories are pruned.
-5. `verify-store` removes browse symlinks for blobs that no longer exist in the canonical store.
-6. `scan --dry-run --browse-root ...` plans the work but does not modify the filesystem.
+4. If a previously scanned source file disappears, its browse symlink is removed
+and empty browse directories are pruned.
+5. `verify-store` removes browse symlinks for blobs that no longer exist in the
+canonical store.
+6. `scan --dry-run --browse-root ...` plans the work but does not modify the
+filesystem.
 
 ## Important constraints
 
 - Keep `planner.py` pure. It should only compute actions.
 - Keep all filesystem and database writes in `executor.py`.
-- Use `pathlib.Path` consistently. The current codebase has already moved to `Path`.
+- Use `pathlib.Path` consistently. The current codebase has already moved to
+  `Path`.
 - Do not replace the canonical hash-based store layout.
 - Do not add an ORM. Stay with raw `sqlite3`.
 
 ## Recommended design
 
-Use the existing `source_files` table as the source of truth for browse metadata. Do **not** add a separate browse table unless absolutely necessary.
+Use the existing `source_files` table as the source of truth for browse
+metadata. Do **not** add a separate browse table unless absolutely necessary.
 
 Recommended new `source_files` columns:
 
@@ -47,20 +58,24 @@ Recommended new `source_files` columns:
 Rationale:
 
 - `file_path` is already the stable key for an observation.
-- each observation needs to remember which source root it came from and what its natural source-relative path is
-- `browse_rel_path` lets rescans remain stable and lets the planner compare desired vs current browse placement
+- each observation needs to remember which source root it came from and what its
+  natural source-relative path is
+- `browse_rel_path` lets rescans remain stable and lets the planner compare
+  desired vs current browse placement
 
 ## Required model changes
 
 ### `src/media_importer/models.py`
 
-Extend `FileObservation` with optional browse-related fields so old tests that construct it manually do not break:
+Extend `FileObservation` with optional browse-related fields so old tests that
+construct it manually do not break:
 
 - `source_root: Path | None = None`
 - `source_rel_path: Path | None = None`
 - `browse_rel_path: Path | None = None`
 
-Add explicit action types for browse maintenance and stale source cleanup. Recommended actions:
+Add explicit action types for browse maintenance and stale source cleanup.
+Recommended actions:
 
 - `CreateOrUpdateBrowseSymlinkAction`
   - `browse_rel_path: Path`
@@ -73,7 +88,8 @@ Add explicit action types for browse maintenance and stale source cleanup. Recom
 - `DeleteObservationAction`
   - `file_path: Path`
 
-Keep `AddBlobAction`, `CopyFileAction`, `InsertObservationAction`, and `MarkStaleAction`.
+Keep `AddBlobAction`, `CopyFileAction`, `InsertObservationAction`, and
+`MarkStaleAction`.
 
 ## Required catalog changes
 
@@ -97,13 +113,18 @@ Update observation reads and writes so `FileObservation` round-trips:
 Add catalog helpers for planner use. Recommended helpers:
 
 - `get_observations_for_hash(file_hash: str) -> list[FileObservation]`
-- `get_stale_observations(source_roots: list[Path], last_seen_at: float) -> list[FileObservation]`
-- `get_live_observations_for_sources(source_roots: list[Path]) -> list[FileObservation]`
+- `get_stale_observations(source_roots: list[Path], last_seen_at: float) ->
+  list[FileObservation]`
+- `get_live_observations_for_sources(source_roots: list[Path]) ->
+  list[FileObservation]`
 
 Notes:
 
-- `get_stale_observations(...)` should return rows under the scanned source roots whose `last_seen_at` is older than the current scan timestamp.
-- `get_live_observations_for_sources(...)` should return only rows for the currently scanned roots and should include enough ordering information to make browse-path assignment deterministic.
+- `get_stale_observations(...)` should return rows under the scanned source
+  roots whose `last_seen_at` is older than the current scan timestamp.
+- `get_live_observations_for_sources(...)` should return only rows for the
+  currently scanned roots and should include enough ordering information to make
+  browse-path assignment deterministic.
 
 ## Required CLI changes
 
@@ -111,9 +132,7 @@ Notes:
 
 Add `--browse-root` to the `scan` command only:
 
-```text
---browse-root PATH
-```
+```text --browse-root PATH ```
 
 Keep it optional.
 
@@ -122,7 +141,8 @@ Thread it through to:
 - `Planner(...)`
 - `Executor(...)`
 
-`verify-store` does not need a new CLI option if planner / executor can infer browse cleanup from catalog state.
+`verify-store` does not need a new CLI option if planner / executor can infer
+browse cleanup from catalog state.
 
 ## Planner design
 
@@ -136,9 +156,11 @@ Update `Planner.__init__` to accept:
 
 ### 1. Continue planning canonical store actions per observation
 
-`plan_observation(...)` should remain focused on blob and observation persistence. It should not perform filesystem writes.
+`plan_observation(...)` should remain focused on blob and observation
+persistence. It should not perform filesystem writes.
 
-Before `plan_observation(...)` is called, each scanned observation should be enriched with:
+Before `plan_observation(...)` is called, each scanned observation should be
+enriched with:
 
 - `source_root`
 - `source_rel_path`
@@ -151,20 +173,26 @@ Use:
 
 This is the key design choice.
 
-Do **not** try to fully assign browse names one observation at a time during streaming scan planning. Collision handling and stale cleanup are easier and more deterministic if browse planning happens in a second phase after the scan observations have been recorded or planned.
+Do **not** try to fully assign browse names one observation at a time during
+streaming scan planning. Collision handling and stale cleanup are easier and
+more deterministic if browse planning happens in a second phase after the scan
+observations have been recorded or planned.
 
 Add a planner method along these lines:
 
-- `plan_browse_reconciliation(source_roots: list[Path], scanned_at: float) -> list[Action]`
+- `plan_browse_reconciliation(source_roots: list[Path], scanned_at: float) ->
+  list[Action]`
 
 This method should:
 
 1. find stale observations for the scanned roots
 2. emit actions to remove their browse symlinks
 3. emit actions to delete those stale observation rows
-4. compute the desired browse path for every remaining live observation in the scanned roots
+4. compute the desired browse path for every remaining live observation in the
+scanned roots
 5. compare desired browse path vs stored `browse_rel_path`
-6. emit actions to create/update symlinks and persist new `browse_rel_path` values
+6. emit actions to create/update symlinks and persist new `browse_rel_path`
+values
 
 ### 3. Collision algorithm
 
@@ -189,22 +217,26 @@ Deterministic ordering matters. Recommended assignment order:
 2. `source_rel_path.as_posix()`
 3. `file_path.as_posix()`
 
-That ensures the first source listed by the user wins the unmodified name, which matches the tests.
+That ensures the first source listed by the user wins the unmodified name, which
+matches the tests.
 
 ### 4. Stale source handling
 
-The current scan flow only updates observations it sees. To satisfy the pruning test, add a post-scan stale cleanup step.
+The current scan flow only updates observations it sees. To satisfy the pruning
+test, add a post-scan stale cleanup step.
 
 Use the scan start time as `scanned_at`.
 
-Any observation under one of the current `source_roots` whose `last_seen_at < scanned_at` is stale for this run and should be removed from:
+Any observation under one of the current `source_roots` whose `last_seen_at <
+scanned_at` is stale for this run and should be removed from:
 
 - browse tree
 - `source_files`
 
 ### 5. Verify-store handling
 
-`plan_verify_store()` must also clean browse entries when a canonical blob is missing.
+`plan_verify_store()` must also clean browse entries when a canonical blob is
+missing.
 
 For each missing blob:
 
@@ -212,7 +244,8 @@ For each missing blob:
 2. emit `RemoveBrowseSymlinkAction` for each observation with a browse path
 3. emit the existing `MarkStaleAction`
 
-This ordering matters because `MarkStaleAction` deletes the blob row, and the existing foreign key cascade may remove source rows.
+This ordering matters because `MarkStaleAction` deletes the blob row, and the
+existing foreign key cascade may remove source rows.
 
 ## Executor design
 
@@ -226,7 +259,8 @@ Update `Executor.__init__` to accept:
 
 ### 1. Canonical copy behavior stays as-is
 
-Do not change the content-addressed copy semantics beyond what is required to coexist with browse actions.
+Do not change the content-addressed copy semantics beyond what is required to
+coexist with browse actions.
 
 ### 2. Implement browse symlink actions
 
@@ -242,10 +276,12 @@ Recommended symlink behavior:
 
 - create parent directories as needed
 - create symlinks that point to the canonical store file
-- prefer **relative symlink targets** computed from the symlink’s parent directory to the store file
+- prefer **relative symlink targets** computed from the symlink’s parent
+  directory to the store file
 - if the symlink already exists and points to the correct target, do nothing
 - if a wrong symlink exists, replace it
-- if a non-symlink filesystem entry exists at the browse path, raise an explicit error instead of deleting user data silently
+- if a non-symlink filesystem entry exists at the browse path, raise an explicit
+  error instead of deleting user data silently
 
 ### 3. Empty directory cleanup
 
@@ -269,12 +305,14 @@ Recommended SQL responsibilities:
 
 ### 5. Action ordering
 
-Make sure browse filesystem actions happen in an order that avoids broken intermediate state:
+Make sure browse filesystem actions happen in an order that avoids broken
+intermediate state:
 
 - remove stale browse symlinks before deleting their DB rows
 - create canonical blob files before creating symlinks that target them
 
-If needed, split execution into phases instead of assuming one flat action list is enough.
+If needed, split execution into phases instead of assuming one flat action list
+is enough.
 
 ## Scan flow changes
 
@@ -291,7 +329,8 @@ Update both paths so browse reconciliation runs after observation scanning.
 
 1. scan sources and batch canonical actions as today
 2. flush the final scan batch
-3. if `browse_root is not None`, run stale cleanup + browse reconciliation as a second phase
+3. if `browse_root is not None`, run stale cleanup + browse reconciliation as a
+second phase
 4. fail the scan if either phase fails
 
 ### Recommended dry-run flow
@@ -337,20 +376,19 @@ This keeps dry-run honest and avoids modifying the filesystem.
 ## Edge cases to handle carefully
 
 - multiple source roots with the same relative path
-- duplicate file content from different source paths: each source path still gets its own browse symlink, even if both point to the same canonical blob
+- duplicate file content from different source paths: each source path still
+  gets its own browse symlink, even if both point to the same canonical blob
 - rescans with no changes must not churn `browse_rel_path`
-- stale browse cleanup must only affect the source roots included in the current scan
-- `verify-store` must clean browse links even though it only receives `--store` and `--db`
+- stale browse cleanup must only affect the source roots included in the current
+  scan
+- `verify-store` must clean browse links even though it only receives `--store`
+  and `--db`
 
 ## Validation checklist
 
 Run these after implementation:
 
-```sh
-pytest
-ruff check .
-mypy src tests
-```
+```sh pytest ruff check . mypy src tests ```
 
 ## Minimum file set expected to change
 
@@ -369,4 +407,5 @@ mypy src tests
 - `tests/test_executor.py`
 - `tests/test_catalog.py`
 
-The implementation should make the new tests pass by adding the missing feature, not by softening the assertions.
+The implementation should make the new tests pass by adding the missing feature,
+not by softening the assertions.
