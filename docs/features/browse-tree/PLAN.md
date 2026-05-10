@@ -42,9 +42,8 @@ scanned source roots, and remove empty directories created only for browse
 links.
 6. Extend `verify-store` handling so missing canonical blobs do not leave
 broken browse entries behind.
-7. Resolve browse-path collisions within a directory by keeping the first path
-unchanged and appending a short snippet of the file's content hash (e.g.,
-`_[hash]`) to later conflicting filenames before their extension.
+7. Prevent browse-path collisions statelessly by always appending a short snippet of
+the file's content hash (e.g., `_[hash]`) to the filename before the extension.
 
 ## Implementation todos
 
@@ -80,16 +79,12 @@ unchanged and appending a short snippet of the file's content hash (e.g.,
 - Add coverage for initial symlink creation, idempotent rescans, stale-link
   pruning, dry-run output, and verify-store interaction.
 - Document the new CLI option and expected behavior in `README.md`.
-- Add collision tests proving that the first matching path keeps its original
-  name and later conflicts become `<name>_[hash].ext`.
+- Add tests proving that all files receive a `<name>_[hash].ext` suffix to prevent collisions.
 
 ## Resolved behavior
 
-- If two or more observations map to the same browse-relative path, the first
-  one keeps the unmodified filename.
-- Later collisions in that same directory are deconflicted statelessly by
-  appending a short snippet of the file's content hash (e.g., the first 7
-  characters) to the filename, before the extension.
-- This stateless approach ensures that symlink names remain perfectly stable
-  even if other conflicting files are added or removed.
+- To prevent collisions and ensure that symlink assignments remain perfectly stable
+  even if other conflicting files are added or removed, all browse paths must
+  unconditionally append a short snippet of the file's content hash (e.g., the first
+  7 characters) to the filename, before the extension.
 

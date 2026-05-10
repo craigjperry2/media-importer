@@ -63,7 +63,10 @@ def test_scan_with_browse_root_creates_source_relative_symlink_tree(workspace):
 
     file_hash = calculate_hash(file_path)
     canonical_path = os.path.join(store_dir, file_hash[:2], f"{file_hash}.mp4")
-    browse_path = os.path.join(browse_root, "Movies", "zabba", "zabba.mp4")
+    short_hash = file_hash[:7]
+    browse_path = os.path.join(
+        browse_root, "Movies", "zabba", f"zabba_{short_hash}.mp4"
+    )
 
     assert os.path.islink(browse_path)
     assert os.path.samefile(browse_path, canonical_path)
@@ -82,7 +85,11 @@ def test_scan_with_relative_source_path_resolves_correctly(workspace, monkeypatc
 
     _run_browse_scan(db_path, store_dir, browse_root, [rel_source_dir])
 
-    browse_path = os.path.join(browse_root, "Movies", "zabba", "zabba.mp4")
+    file_hash = calculate_hash(file_path)
+    short_hash = file_hash[:7]
+    browse_path = os.path.join(
+        browse_root, "Movies", "zabba", f"zabba_{short_hash}.mp4"
+    )
     assert os.path.islink(browse_path)
 
 
@@ -94,15 +101,18 @@ def test_rescan_with_browse_root_is_idempotent(workspace):
     file_path = os.path.join(source_dir, "Movies", "zabba", "zabba.mp4")
     _write_file(file_path, "video-one")
 
+    file_hash = calculate_hash(file_path)
+    short_hash = file_hash[:7]
+
     catalog = _run_browse_scan(db_path, store_dir, browse_root, [source_dir])
     catalog.close()
     catalog = _run_browse_scan(db_path, store_dir, browse_root, [source_dir])
     catalog.close()
 
-    assert _browse_entries(browse_root) == ["Movies/zabba/zabba.mp4"]
+    assert _browse_entries(browse_root) == [f"Movies/zabba/zabba_{short_hash}.mp4"]
 
 
-def test_colliding_browse_paths_are_deconflicted_with_hash_suffixes(workspace):
+def test_colliding_browse_paths_are_prevented_with_hash_suffixes(workspace):
     store_dir = os.path.join(workspace, "store")
     browse_root = os.path.join(workspace, "browse")
     db_path = os.path.join(workspace, "db.sqlite")
@@ -119,19 +129,24 @@ def test_colliding_browse_paths_are_deconflicted_with_hash_suffixes(workspace):
     second_hash = calculate_hash(second_path)
     first_store_path = os.path.join(store_dir, first_hash[:2], f"{first_hash}.mp4")
     second_store_path = os.path.join(store_dir, second_hash[:2], f"{second_hash}.mp4")
-    original_browse_path = os.path.join(browse_root, "Movies", "zabba", "zabba.mp4")
-    short_hash = second_hash[:7]
-    hash_suffixed_browse_path = os.path.join(
-        browse_root, "Movies", "zabba", f"zabba_{short_hash}.mp4"
+
+    first_short_hash = first_hash[:7]
+    first_browse_path = os.path.join(
+        browse_root, "Movies", "zabba", f"zabba_{first_short_hash}.mp4"
     )
 
-    assert os.path.islink(original_browse_path)
-    assert os.path.islink(hash_suffixed_browse_path)
-    assert os.path.samefile(original_browse_path, first_store_path)
-    assert os.path.samefile(hash_suffixed_browse_path, second_store_path)
+    second_short_hash = second_hash[:7]
+    second_browse_path = os.path.join(
+        browse_root, "Movies", "zabba", f"zabba_{second_short_hash}.mp4"
+    )
+
+    assert os.path.islink(first_browse_path)
+    assert os.path.islink(second_browse_path)
+    assert os.path.samefile(first_browse_path, first_store_path)
+    assert os.path.samefile(second_browse_path, second_store_path)
 
 
-def test_colliding_browse_paths_across_separate_scans_are_deconflicted(workspace):
+def test_colliding_browse_paths_across_separate_scans_are_prevented(workspace):
     store_dir = os.path.join(workspace, "store")
     browse_root = os.path.join(workspace, "browse")
     db_path = os.path.join(workspace, "db.sqlite")
@@ -148,15 +163,20 @@ def test_colliding_browse_paths_across_separate_scans_are_deconflicted(workspace
     catalog = _run_browse_scan(db_path, store_dir, browse_root, [source_two])
     catalog.close()
 
-    original_browse_path = os.path.join(browse_root, "Movies", "zabba", "zabba.mp4")
-    second_hash = calculate_hash(second_path)
-    short_hash = second_hash[:7]
-    hash_suffixed_browse_path = os.path.join(
-        browse_root, "Movies", "zabba", f"zabba_{short_hash}.mp4"
+    first_hash = calculate_hash(first_path)
+    first_short_hash = first_hash[:7]
+    first_browse_path = os.path.join(
+        browse_root, "Movies", "zabba", f"zabba_{first_short_hash}.mp4"
     )
 
-    assert os.path.islink(original_browse_path)
-    assert os.path.islink(hash_suffixed_browse_path)
+    second_hash = calculate_hash(second_path)
+    second_short_hash = second_hash[:7]
+    second_browse_path = os.path.join(
+        browse_root, "Movies", "zabba", f"zabba_{second_short_hash}.mp4"
+    )
+
+    assert os.path.islink(first_browse_path)
+    assert os.path.islink(second_browse_path)
 
 
 def test_rescan_prunes_missing_browse_symlink_and_empty_directories(workspace):
@@ -167,6 +187,9 @@ def test_rescan_prunes_missing_browse_symlink_and_empty_directories(workspace):
     file_path = os.path.join(source_dir, "Albums", "A", "track.mp3")
     _write_file(file_path, "track-one")
 
+    file_hash = calculate_hash(file_path)
+    short_hash = file_hash[:7]
+
     catalog = _run_browse_scan(db_path, store_dir, browse_root, [source_dir])
     catalog.close()
 
@@ -175,7 +198,7 @@ def test_rescan_prunes_missing_browse_symlink_and_empty_directories(workspace):
     catalog = _run_browse_scan(db_path, store_dir, browse_root, [source_dir])
     catalog.close()
 
-    browse_path = os.path.join(browse_root, "Albums", "A", "track.mp3")
+    browse_path = os.path.join(browse_root, "Albums", "A", f"track_{short_hash}.mp3")
     leaf_dir = os.path.join(browse_root, "Albums", "A")
 
     assert not os.path.lexists(browse_path)
@@ -194,7 +217,11 @@ def test_verify_store_removes_broken_browse_symlinks(workspace):
 
     file_hash = calculate_hash(file_path)
     canonical_path = os.path.join(store_dir, file_hash[:2], f"{file_hash}.mp4")
-    browse_path = os.path.join(browse_root, "Movies", "zabba", "zabba.mp4")
+    short_hash = file_hash[:7]
+    browse_path = os.path.join(
+        browse_root, "Movies", "zabba", f"zabba_{short_hash}.mp4"
+    )
+
     os.remove(canonical_path)
 
     # Verify store runs without a browse_root argument, relying on DB state
@@ -245,7 +272,7 @@ def test_scan_dry_run_with_browse_root_leaves_filesystem_untouched(
     assert not os.path.exists(browse_root)
 
 
-def test_scan_dry_run_correctly_plans_collisions_against_existing_catalog(
+def test_scan_dry_run_correctly_plans_against_existing_catalog(
     workspace, monkeypatch, capsys
 ):
     store_dir = os.path.join(workspace, "store")

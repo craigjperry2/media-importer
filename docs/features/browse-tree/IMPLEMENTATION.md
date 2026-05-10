@@ -25,9 +25,8 @@ The key required behaviors are:
 1. `scan --browse-root ...` creates source-relative symlinks that point to the
 canonical blob.
 2. Re-running the same scan is idempotent.
-3. Path collisions are resolved as:
-   - first file keeps `name.ext`
-   - later collisions become `name_[hash].ext` where `[hash]` is a short
+3. Path collisions are prevented by ensuring all files are suffixed:
+   - all browse symlinks become `name_[hash].ext` where `[hash]` is a short
      snippet (e.g., 7 chars) of the file's hash.
 4. If a previously scanned source file disappears, its browse symlink is
 removed and empty browse directories are pruned.
@@ -130,7 +129,7 @@ Notes:
 
 - `get_stale_observations(...)` should return rows under the scanned source
   roots whose `last_seen_at` is older than the current scan timestamp.
-- `get_all_live_observations()` should return all rows across all source roots and should include enough ordering information to make browse-path assignment deterministic.
+- `get_all_live_observations()` should return all rows across all source roots.
 
 ## Required CLI changes
 
@@ -201,30 +200,23 @@ This method should:
 7. emit actions to create/update symlinks and persist new `browse_rel_path`
 values
 
-### 3. Collision algorithm
+### 3. Collision prevention
 
-Collision handling must match the tests and remain stable.
+Collision handling must remain stable. By appending a short snippet of the
+file's content hash to all browse paths, we can avoid stateful "first wins"
+assignment logic.
 
-For each live observation across all source roots (from the catalog merged with the current scan):
+For each observation:
 
 1. start from `source_rel_path`
-2. if that relative path is unused in the browse tree assignment set, keep it
-3. if occupied, append a short hash suffix (e.g., the first 7 chars of
+2. unconditionally append a short hash suffix (e.g., the first 7 chars of
 `file_hash`) to the file stem, before the extension.
 
 Example:
 
-- `Movies/zabba/zabba.mp4`
+- `Movies/zabba/zabba_0000000.mp4`
 - `Movies/zabba/zabba_a1b2c3d.mp4`
 - `Movies/zabba/zabba_e5f6g7h.mp4`
-
-To ensure stability and that the first source listed by the user wins the unmodified name (which
-matches the tests), assign browse paths in this deterministic order:
-
-1. observation is from a previously scanned root (preserves existing assignments)
-2. source root order from the current `--source` argument list
-3. `source_rel_path.as_posix()`
-4. `file_path.as_posix()`
 
 ### 4. Stale source handling
 
@@ -370,7 +362,7 @@ This keeps dry-run honest and avoids modifying the filesystem.
 
 5. **Planner browse reconciliation**
    - stale observation detection
-   - collision assignment
+   - unconditional hash suffix assignment
    - browse path update planning
 
 6. **Verify-store browse cleanup**
