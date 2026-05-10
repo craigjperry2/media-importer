@@ -186,15 +186,17 @@ observations have been recorded or planned.
 
 Add a planner method along these lines:
 
-- `plan_browse_reconciliation(source_roots: list[Path], scanned_at: float, current_scan_observations: list[FileObservation]) ->
-  list[Action]`
+- `plan_browse_reconciliation(source_roots: list[Path], scanned_at: float,
+  current_scan_observations: list[FileObservation]) -> list[Action]`
 
 This method should:
 
 1. find stale observations for the scanned roots
 2. emit actions to remove their browse symlinks
 3. emit actions to delete those stale observation rows
-4. construct an in-memory merged view of the catalog's existing live observations plus the `current_scan_observations` (crucial for dry runs since planned rows aren't in the DB yet)
+4. construct an in-memory merged view of the catalog's existing live
+observations plus the `current_scan_observations` (crucial for dry runs since
+planned rows aren't in the DB yet)
 5. compute the desired browse path for every observation in this merged view
 6. compare desired browse path vs stored `browse_rel_path`
 7. emit actions to create/update symlinks and persist new `browse_rel_path`
@@ -220,14 +222,19 @@ Example:
 
 ### 4. Overlapping source roots prevention
 
-To protect the unique `file_path` assumption, a single physical file must not be scanned under multiple conflicting source roots (e.g., scanning `/photos` and `/photos/2024`).
+To protect the unique `file_path` assumption, a single physical file must not
+be scanned under multiple conflicting source roots (e.g., scanning `/photos`
+and `/photos/2024`).
 
 Update the planner (or CLI) to validate source roots before scanning:
 
 1. Check for overlaps among the current scan's `--source` arguments.
 2. Query the catalog for all existing unique `source_root` values.
-3. Check for overlaps between the current scan's `--source` arguments and the catalog's existing source roots.
-4. If an overlap is detected (where one root is a parent or child of another), raise a `ValueError` with a clear message and abort the scan. Identical source roots (exact matches) are allowed for rescans.
+3. Check for overlaps between the current scan's `--source` arguments and the
+catalog's existing source roots.
+4. If an overlap is detected (where one root is a parent or child of another),
+raise a `ValueError` with a clear message and abort the scan. Identical source
+roots (exact matches) are allowed for rescans.
 
 ### 5. Stale source handling
 
@@ -264,7 +271,8 @@ Update `Executor.__init__` to accept and immediately resolve to absolute paths:
 
 - `catalog: Catalog`
 - `store_dir: Path` (must be resolved using `.resolve()`)
-- `browse_root: Path | None = None` (must be resolved using `.resolve()` if provided)
+- `browse_root: Path | None = None` (must be resolved using `.resolve()` if
+  provided)
 
 ### 1. Canonical copy behavior stays as-is
 
@@ -290,8 +298,8 @@ Recommended symlink behavior:
 - if the symlink already exists and points to the correct target, do nothing
 - if a wrong symlink exists, replace it
 - if a non-symlink filesystem entry exists at the browse path, raise an
-  explicit error instead of deleting user data silently. Ensure acceptance
-  test coverage of this safety property.
+  explicit error instead of deleting user data silently. Ensure acceptance test
+  coverage of this safety property.
 
 ### 3. Empty directory cleanup
 

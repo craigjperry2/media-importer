@@ -36,15 +36,25 @@ symlinks without requiring the user to pass `--browse-root`.
 3. Add explicit action types for browse-tree maintenance so dry-run output
 shows planned symlink work and all side-effects remain in `executor.py`.
 4. When browse mode is enabled, plan creation/update of symlinks pointing at
-canonical store blobs using the source-relative path from the scanned root. Because dry-run mode does not write observations to the database during the scan phase, the planner must construct an in-memory merged view of all existing catalog rows (across all source roots) plus the newly scanned observations to correctly resolve global collisions and assign paths.
+canonical store blobs using the source-relative path from the scanned root.
+Because dry-run mode does not write observations to the database during the
+scan phase, the planner must construct an in-memory merged view of all existing
+catalog rows (across all source roots) plus the newly scanned observations to
+correctly resolve global collisions and assign paths.
 5. Prune obsolete browse links for files that are no longer present under the
 scanned source roots, and remove empty directories created only for browse
 links.
 6. Extend `verify-store` handling so missing canonical blobs do not leave
 broken browse entries behind.
-7. Prevent browse-path collisions statelessly by always appending a short snippet of
-the file's content hash (e.g., `_[hash]`) to the filename before the extension.
-8. Reject overlapping source roots. If the user attempts to scan a source root that is a parent or child of another source root (either in the same scan or across previous scans recorded in the catalog), the scan must be aborted. This prevents a single physical file from mapping to multiple differing source-relative paths, which would corrupt the `file_path` uniqueness assumption.
+7. Prevent browse-path collisions statelessly by always appending a short
+snippet of the file's content hash (e.g., `_[hash]`) to the filename before the
+extension.
+8. Reject overlapping source roots. If the user attempts to scan a source root
+that is a parent or child of another source root (either in the same scan or
+across previous scans recorded in the catalog), the scan must be aborted. This
+prevents a single physical file from mapping to multiple differing
+source-relative paths, which would corrupt the `file_path` uniqueness
+assumption.
 
 ## Implementation todos
 
@@ -61,8 +71,12 @@ the file's content hash (e.g., `_[hash]`) to the filename before the extension.
 
 3. **Plan browse actions**
 - Add action dataclasses for symlink creation/update and symlink removal.
-- Ensure that `store_dir`, `browse_root`, all `source_roots`, and observation file paths are systematically resolved to absolute paths before planning or executing any actions. This guarantees that relative symlink targets remain accurate regardless of the current working directory.
-- Compute browse-relative paths from each scanned source root (using the fully resolved absolute paths to avoid `ValueError` during path resolution).
+- Ensure that `store_dir`, `browse_root`, all `source_roots`, and observation
+  file paths are systematically resolved to absolute paths before planning or
+  executing any actions. This guarantees that relative symlink targets remain
+  accurate regardless of the current working directory.
+- Compute browse-relative paths from each scanned source root (using the fully
+  resolved absolute paths to avoid `ValueError` during path resolution).
 - Detect existing/stale browse entries so repeated scans stay idempotent.
 
 4. **Execute browse actions**
@@ -81,12 +95,13 @@ the file's content hash (e.g., `_[hash]`) to the filename before the extension.
 - Add coverage for initial symlink creation, idempotent rescans, stale-link
   pruning, dry-run output, and verify-store interaction.
 - Document the new CLI option and expected behavior in `README.md`.
-- Add tests proving that all files receive a `<name>_[hash].ext` suffix to prevent collisions.
+- Add tests proving that all files receive a `<name>_[hash].ext` suffix to
+  prevent collisions.
 
 ## Resolved behavior
 
-- To prevent collisions and ensure that symlink assignments remain perfectly stable
-  even if other conflicting files are added or removed, all browse paths must
-  unconditionally append a short snippet of the file's content hash (e.g., the first
-  7 characters) to the filename, before the extension.
+- To prevent collisions and ensure that symlink assignments remain perfectly
+  stable even if other conflicting files are added or removed, all browse paths
+  must unconditionally append a short snippet of the file's content hash (e.g.,
+  the first 7 characters) to the filename, before the extension.
 
