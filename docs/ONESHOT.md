@@ -443,7 +443,10 @@ Required option:
 
 Optional filters:
 
-- `--ext EXT`: exact match against `source_files.file_format`
+- `--ext EXT`: normalize the argument before matching by lowercasing it and
+  adding a leading dot when missing; then exact-match the normalized value
+  against `source_files.file_format`. For example, `jpg`, `.jpg`, and `.JPG`
+  all match cataloged `.jpg` files.
 - `--name TEXT`: substring match against `source_files.file_name` using SQL
   `LIKE '%TEXT%'`
 - `--hash HASH`: exact match against `source_files.file_hash`
