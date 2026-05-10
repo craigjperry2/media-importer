@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Media Importer - Onboarding Guide</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --bg: #f3f4f6;
+            --surface: #ffffff;
+            --text-main: #1f2937;
+            --text-muted: #6b7280;
+            --code-bg: #1e1e1e;
+            
+            --critical-border: #ef4444;
+            --critical-bg: #fef2f2;
+            --critical-text: #991b1b;
+            
+            --warning-border: #f59e0b;
+            --warning-bg: #fffbeb;
+            --warning-text: #92400e;
+            
+            --info-border: #3b82f6;
+            --info-bg: #eff6ff;
+            --info-text: #1e40af;
+
+            --success-border: #10b981;
+            --success-bg: #ecfdf5;
+            --success-text: #065f46;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-main);
+            background-color: var(--bg);
+            margin: 0;
+            padding: 2rem;
+            max-width: 1200px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        header {
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 2px solid #e5e7eb;
+        }
+
+        h1, h2, h3 {
+            color: var(--text-main);
+        }
+
+        .card {
+            background: var(--surface);
+            border-radius: 8px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        .architecture-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-top: 1.5rem;
+        }
+
+        .module {
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 1rem;
+            background: #f9fafb;
+        }
+
+        .module h4 {
+            margin-top: 0;
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            background: #e5e7eb;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.875em;
+        }
+
+        pre code {
+            background: transparent;
+            color: #d4d4d4;
+            padding: 0;
+        }
+
+        .finding {
+            border-left: 4px solid;
+            padding: 1rem 1.5rem;
+            margin: 1.5rem 0;
+            border-radius: 0 8px 8px 0;
+            position: relative;
+        }
+
+        .finding h4 {
+            margin-top: 0;
+            margin-bottom: 0.5rem;
+        }
+
+        .finding.critical {
+            border-color: var(--critical-border);
+            background: var(--critical-bg);
+            color: var(--critical-text);
+        }
+
+        .finding.warning {
+            border-color: var(--warning-border);
+            background: var(--warning-bg);
+            color: var(--warning-text);
+        }
+
+        .finding.info {
+            border-color: var(--info-border);
+            background: var(--info-bg);
+            color: var(--info-text);
+        }
+
+        .finding.success {
+            border-color: var(--success-border);
+            background: var(--success-bg);
+            color: var(--success-text);
+        }
+
+        .code-container {
+            display: flex;
+            background: var(--code-bg);
+            border-radius: 6px;
+            margin: 1rem 0;
+            overflow: hidden;
+        }
+
+        .code-block {
+            flex-grow: 1;
+            padding: 1rem;
+            overflow-x: auto;
+            margin: 0;
+        }
+
+        .margin-annotation {
+            width: 300px;
+            background: #2d2d2d;
+            padding: 1rem;
+            color: #a3a3a3;
+            font-size: 0.875rem;
+            border-left: 1px solid #404040;
+        }
+
+        .diff-add { color: #4ade80; }
+        .diff-remove { color: #f87171; }
+        .diff-context { color: #d4d4d4; }
+
+        .pipeline {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin: 2rem 0;
+            padding: 1rem;
+            background: #f8fafc;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+        }
+        
+        .pipeline-step {
+            text-align: center;
+            flex: 1;
+        }
+
+        .pipeline-arrow {
+            color: #94a3b8;
+            font-weight: bold;
+            font-size: 1.5rem;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            text-transform: uppercase;
+            margin-left: 0.5rem;
+        }
+
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Media Importer 🎬</h1>
+        <p class="subtitle">Onboarding & Architecture Overview</p>
+    </header>
+
+    <div class="card">
+        <h2>System Overview</h2>
+        <p>
+            <strong>Media Importer</strong> is a production-grade Python CLI tool for incrementally consolidating media files from multiple source directories into a centralized, deduplicated "store". 
+            It leverages cryptographic hashing (Blake2b) to ensure integrity, an SQLite catalog to index files and cache hashes, and an atomic, fail-safe execution engine for reliable operations.
+        </p>
+        
+        <h3>Execution Pipeline</h3>
+        <div class="pipeline">
+            <div class="pipeline-step">
+                <strong>Scanner</strong><br>
+                <small>Yields FileObservations</small>
+            </div>
+            <div class="pipeline-arrow">➔</div>
+            <div class="pipeline-step">
+                <strong>Catalog & Hasher</strong><br>
+                <small>Resolves Hashes</small>
+            </div>
+            <div class="pipeline-arrow">➔</div>
+            <div class="pipeline-step">
+                <strong>Planner</strong><br>
+                <small>Yields Actions (Pure)</small>
+            </div>
+            <div class="pipeline-arrow">➔</div>
+            <div class="pipeline-step">
+                <strong>Executor</strong><br>
+                <small>Applies Side-Effects</small>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Component Architecture</h2>
+        <div class="architecture-grid">
+            <div class="module">
+                <h4><code>models.py</code></h4>
+                <p>Contains domain models using standard <code>@dataclass</code>. Defines exactly two core data concepts: domain entities (<code>Blob</code>, <code>FileObservation</code>) and operations (<code>Action</code> subclasses like <code>CopyFileAction</code>).</p>
+            </div>
+            <div class="module">
+                <h4><code>catalog.py</code></h4>
+                <p>Manages the SQLite database connection. Contains strict, explicit schemas for <code>blobs</code> (the centralized file records) and <code>source_files</code> (where each file originally came from). Employs WAL (Write-Ahead Logging) for concurrent read scaling.</p>
+            </div>
+            <div class="module">
+                <h4><code>planner.py</code></h4>
+                <p>The pure-functional core of the application. It receives a <code>FileObservation</code>, checks database state, and determines exactly what <code>Action</code>s should be taken. It modifies no state itself.</p>
+            </div>
+            <div class="module">
+                <h4><code>executor.py</code></h4>
+                <p>The effectful engine. It executes a list of <code>Action</code>s generated by the planner. It ensures atomic file copying (writing to <code>.tmp</code> and replacing) and wraps database mutations within a transaction.</p>
+            </div>
+            <div class="module">
+                <h4><code>scanner.py</code> & <code>hashing.py</code></h4>
+                <p>Responsible for filesystem crawling (omitting symlinks) and calculating Blake2b file hashes. Fast, independent, and stateless.</p>
+            </div>
+            <div class="module">
+                <h4><code>cli.py</code></h4>
+                <p>Provides the command-line interface. Orchestrates batched pipeline execution to limit memory consumption (<code>_SCAN_BATCH_BYTES</code>) while maintaining UI progress reports.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>Code Review & Findings</h2>
+        <p>A comprehensive analysis of the existing codebase. Below are prioritized findings and suggested improvements.</p>
+
+        <!-- INFO / SUCCESS Finding -->
+        <div class="finding success">
+            <h4>Architecture Pattern: Pure/Impure Separation</h4>
+            <p>
+                The separation between <code>planner.py</code> (pure functions, returning value objects) and <code>executor.py</code> (side-effect management) is excellent. It allows for exhaustive unit testing of logic without mocking filesystems or databases.
+            </p>
+        </div>
+
+        <!-- WARNING Finding -->
+        <div class="finding warning">
+            <h4>IO Bottleneck: Hashing Chunk Size <span class="badge" style="background:#f59e0b;color:white;">Warning</span></h4>
+            <p>
+                In <code>hashing.py</code>, the chunk size used for reading files during hashing is relatively small (8KB). Modern SSDs and operating systems perform significantly better with larger buffer sizes (e.g., 1MB or 64KB).
+            </p>
+            
+            <div class="code-container">
+                <pre class="code-block"><code><span class="diff-context">def calculate_hash(file_path: Path, </span><span class="diff-remove">- chunk_size: int = 8192</span><span class="diff-context">) -> str:</span>
+<span class="diff-context">def calculate_hash(file_path: Path, </span><span class="diff-add">+ chunk_size: int = 1024 * 1024</span><span class="diff-context">) -> str:</span>
+<span class="diff-context">    hasher = hashlib.blake2b()
+    with file_path.open("rb") as f:
+        while chunk := f.read(chunk_size):
+            hasher.update(chunk)
+    return hasher.hexdigest()</span></code></pre>
+                <div class="margin-annotation">
+                    <strong>Margin Note:</strong><br>
+                    Increasing the buffer size to 1MB will drastically reduce the number of system calls (<code>read()</code>) for large video files, yielding a notable performance boost.
+                </div>
+            </div>
+        </div>
+
+        <!-- WARNING Finding -->
+        <div class="finding warning">
+            <h4>Atomic File System Constraints <span class="badge" style="background:#f59e0b;color:white;">Warning</span></h4>
+            <p>
+                In <code>executor.py</code>, atomic file replacement is implemented via writing to a temporary file and using <code>Path.replace()</code>.
+            </p>
+
+            <div class="code-container">
+                <pre class="code-block"><code><span class="diff-context">tmp_path = Path(f"{full_store_path}.tmp")
+shutil.copy2(action.source_path, tmp_path)
+with tmp_path.open("ab") as f:
+    os.fsync(f.fileno())</span>
+<span class="diff-remove">- tmp_path.replace(full_store_path)</span>
+<span class="diff-add">+ # tmp_path.replace() is atomic on POSIX, 
++ # assuming both paths reside on the same filesystem.</span>
+<span class="diff-context">+ tmp_path.replace(full_store_path)</span></code></pre>
+                <div class="margin-annotation">
+                    <strong>Margin Note:</strong><br>
+                    Because <code>tmp_path</code> and <code>full_store_path</code> are always in the exact same directory, this pattern is perfectly safe and robust. Good job on adding <code>os.fsync</code> to ensure OS buffers are flushed to disk before renaming.
+                </div>
+            </div>
+        </div>
+
+        <!-- INFO Finding -->
+        <div class="finding info">
+            <h4>Database Constraints <span class="badge" style="background:#3b82f6;color:white;">Info</span></h4>
+            <p>
+                In <code>catalog.py</code>, the schema includes a <code>UNIQUE</code> constraint on <code>file_path</code> in <code>source_files</code>, but querying uses an unindexed lookup (unless relying on the implicit index created by UNIQUE).
+            </p>
+            
+            <div class="code-container">
+                <pre class="code-block"><code><span class="diff-context">CREATE TABLE IF NOT EXISTS source_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_path TEXT UNIQUE, </span><span class="diff-add">-- Note: SQLite creates an implicit index here</span><span class="diff-context">
+    file_name TEXT,
+    ...</span></code></pre>
+                <div class="margin-annotation">
+                    <strong>Margin Note:</strong><br>
+                    Because <code>file_path</code> is declared as <code>UNIQUE</code>, SQLite automatically creates a covering index. The <code>get_observation(file_path)</code> lookup is already optimal.
+                </div>
+            </div>
+        </div>
+        
+        <!-- CRITICAL Finding -->
+        <div class="finding critical">
+            <h4>Exception Shadowing <span class="badge" style="background:#ef4444;color:white;">Critical</span></h4>
+            <p>
+                In <code>executor.py</code>, a broad <code>Exception</code> block catches everything during a transaction, logs it, but does not re-raise or handle specific transaction-breaking errors explicitly beyond skipping DB commit.
+            </p>
+            <div class="code-container">
+                <pre class="code-block"><code><span class="diff-context">try:
+    self.catalog.execute_in_transaction(...)
+    db_committed = True</span>
+<span class="diff-remove">- except Exception as e:</span>
+<span class="diff-remove">-     logger.error(f"Failed to update database: {e}")</span>
+<span class="diff-add">+ except sqlite3.Error as e:</span>
+<span class="diff-add">+     logger.error(f"Database transaction failed: {e}")
++     # The batch fails to commit, but the app can safely continue.</span></code></pre>
+                <div class="margin-annotation">
+                    <strong>Margin Note:</strong><br>
+                    Broad <code>except Exception:</code> can catch <code>KeyboardInterrupt</code> (if not subclassing BaseException) or other critical application errors (like OOM or NameErrors). It's best practice to catch <code>sqlite3.Error</code> specifically when dealing with database transactions.
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
