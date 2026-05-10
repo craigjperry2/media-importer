@@ -10,20 +10,18 @@ Build a command-line tool named `media-importer` that incrementally consolidates
 files from one or more source directories into a deduplicated, content-addressed
 store, while maintaining a SQLite catalog as both an index and a hash cache.
 
-The tool also optionally maintains a human-browsable symlink overlay that mirrors
+The tool also maintains a human-browsable symlink overlay that mirrors
 source-relative paths while leaving real file bytes only in the canonical store.
 
 ## Technology Constraints
 
-- Use Python 3.13 or newer.
-- Expose a console script named `media-importer`.
-- Use only the Python standard library at runtime.
-- Use raw `sqlite3`; do not use an ORM.
+- Expose a command named `media-importer`.
+- Use SQLite directly; do not use an ORM.
 - Keep state-comparison/planning pure: planning may inspect the catalog and
   filesystem but must not write to the database or filesystem.
 - Keep all database writes, file copies, symlink creation/removal, and directory
   creation/removal in the executor/effectful layer.
-- Use `pathlib.Path` or an equivalent path abstraction consistently.
+- Use a consistent path abstraction that preserves platform path semantics.
 
 ## Core Concepts
 
@@ -51,10 +49,14 @@ Required fields:
 - `mtime`: filesystem modification time.
 - `file_hash`: content hash, nullable before hashing.
 - `last_seen_at`: Unix timestamp for the latest scan that saw this path.
-- `source_root`: resolved source root used for browse mode, nullable.
-- `source_rel_path`: source-relative file path used for browse mode, nullable.
-- `browse_root`: resolved browse root used for browse mode, nullable.
-- `browse_rel_path`: browse-root-relative symlink path, nullable.
+- `source_root`: resolved source root, nullable only for observations not
+  created by `scan`.
+- `source_rel_path`: source-relative file path, nullable only for observations
+  not created by `scan`.
+- `browse_root`: resolved browse root, nullable only for observations not
+  created by `scan`.
+- `browse_rel_path`: browse-root-relative symlink path, nullable only for
+  observations not created by `scan`.
 
 ### Action Plan
 
@@ -74,9 +76,36 @@ Dry runs print these planned actions and perform no writes.
 
 ## Hashing
 
-- Hash file contents with `hashlib.blake2b()`.
-- Read files incrementally in chunks; default chunk size may be 8192 bytes.
+- Hash file contents with BLAKE2b.
+- Read files incrementally in chunks.
+- The default hashing chunk size should be tuned for large media files, not
+  small text files. A default around 1-4 MiB is appropriate unless benchmarking
+  on the target platform shows a better value.
+- The chunk size should be configurable by implementation or CLI option.
 - The hash result must be independent of chunk size.
+
+## File I/O Strategy
+
+Media files are commonly large enough that unnecessary second passes over the
+same data dominate runtime. Design the importer with mechanical sympathy for the
+filesystem and operating system page cache:
+
+- Hashing reads the full source file; copying reads it again and writes the full
+  destination file. When a newly hashed file needs to be copied, perform the
+  copy promptly after hashing that file, before hashing or copying unrelated
+  files, so the source bytes are likely still hot in the OS page cache.
+- Do not make a complete hashing pass over all new media and only then start a
+  copy pass
+- Use catalog state to choose an efficient default strategy:
+  - initial import: when the catalog has no blobs or observations for the
+    selected roots, prefer streaming per-file hash/plan/copy/commit work in
+    bounded batches
+  - maintenance pass: when most observations are cache hits, prefer metadata
+    scanning first and only hash/copy changed or missing content
+  - incremental ingestion: when new files are a minority, process each changed
+    file through hash and copy close together
+- Dry runs may compute the complete action list up front because they do not
+  read file contents twice for copying.
 
 ## Scanning
 
@@ -121,6 +150,12 @@ CREATE TABLE IF NOT EXISTS blobs (
     first_seen_at REAL
 );
 
+CREATE TABLE IF NOT EXISTS source_roots (
+    source_root TEXT PRIMARY KEY,
+    first_seen_at REAL,
+    last_seen_at REAL
+);
+
 CREATE TABLE IF NOT EXISTS source_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     file_path TEXT UNIQUE,
@@ -134,11 +169,15 @@ CREATE TABLE IF NOT EXISTS source_files (
     source_rel_path TEXT,
     browse_root TEXT,
     browse_rel_path TEXT,
-    FOREIGN KEY(file_hash) REFERENCES blobs(file_hash) ON DELETE CASCADE
+    FOREIGN KEY(file_hash) REFERENCES blobs(file_hash) ON DELETE CASCADE,
+    FOREIGN KEY(source_root) REFERENCES source_roots(source_root)
 );
 
-CREATE TABLE IF NOT EXISTS source_roots (
-    source_root TEXT PRIMARY KEY
+CREATE TABLE IF NOT EXISTS run_locks (
+    lock_name TEXT PRIMARY KEY,
+    owner_token TEXT NOT NULL,
+    acquired_at REAL NOT NULL,
+    heartbeat_at REAL NOT NULL
 );
 ```
 
@@ -147,11 +186,13 @@ Required indexes:
 - `source_files(file_name)`
 - `source_files(file_format)`
 - `source_files(file_hash)`
+- `source_files(source_root)`
 
 Enable foreign keys and use WAL journal mode for writable catalogs.
 
-For compatibility with older databases, ensure missing browse/source metadata
-columns are added to `source_files`.
+`source_roots` is a root registry, not derived cache. It records roots that have
+been used for browse reconciliation so future scans can reject overlapping roots
+even if a previously scanned root currently has no remaining observations.
 
 Read-only behavior:
 
@@ -159,6 +200,25 @@ Read-only behavior:
 - If the database does not exist and the operation is read-only/dry-run, use an
   in-memory initialized schema so queries and dry-run planning can proceed
   without creating a database file.
+
+Run locking:
+
+- Mutating commands must defend against accidentally concurrent importer runs by
+  acquiring a catalog-backed lock before scanning, hashing, copying, or
+  modifying the browse tree.
+- Use the `run_locks` table, or an equivalent SQLite-backed single-writer lock,
+  with a unique lock name such as `media-importer`.
+- Lock acquisition must be atomic. If another live owner holds the lock, fail
+  quickly with a clear error and non-zero exit status unless the user has
+  explicitly requested waiting.
+- Record an owner token and heartbeat timestamp. Refresh the heartbeat during
+  long runs so stale-lock detection can be implemented safely.
+- Remove the lock on normal completion. If a crash leaves a stale lock, only
+  break it when the heartbeat age exceeds a conservative timeout or when the
+  user explicitly requests a force-unlock operation.
+- Dry-run and read-only query operations do not acquire the write lock, but they
+  must tolerate the catalog changing underneath them or clearly document that
+  they read a point-in-time snapshot.
 
 ## Command Line Interface
 
@@ -169,22 +229,26 @@ Required options:
 - `--store PATH`
 - `--db PATH`
 - `--source PATH`, repeatable
+- `--browse-root PATH`
 
 Optional flags:
 
 - `--dry-run`
-- `--browse-root PATH`
 - `--rehash-all`
+- `--hash-chunk-bytes BYTES`
 
 Behavior:
 
-1. Print progress to stderr.
+1. Acquire the catalog run lock in live mode.
 2. Scan all source roots.
 3. Reuse cached hashes when possible.
-4. Plan blob additions, file copies, and observation upserts.
-5. In live mode, execute copies and database updates in bounded batches.
+4. Plan blob additions, file copies, observation upserts, browse symlinks, and
+   stale observation cleanup.
+5. In live mode, execute copies, browse updates, and database updates in bounded
+   batches according to the selected I/O strategy.
 6. In dry-run mode, print the number of actions and each action to stdout.
-7. Exit non-zero if execution fails.
+7. Report progress to stdout and errors to stderr.
+8. Exit non-zero if execution fails.
 
 Hash cache behavior:
 
@@ -192,8 +256,8 @@ Hash cache behavior:
 - If `--rehash-all` is false and existing `size_bytes` and `mtime` match the
   current file, reuse the stored `file_hash`.
 - Otherwise rehash the file.
-- Preserve existing browse metadata during rehash unless current browse mode
-  supplies a browse root.
+- Preserve existing browse metadata during rehash until the browse
+  reconciliation phase computes the desired current metadata.
 
 Deduplication behavior:
 
@@ -202,11 +266,17 @@ Deduplication behavior:
 - If two source files have identical content in the same run, only one blob row
   and one store copy are needed, but both observations are inserted/updated.
 
-Batching behavior:
+Batching and I/O behavior:
 
 - Live scans process canonical copy/database actions in bounded batches.
-- The current implementation uses a 256 MiB byte threshold, but an equivalent
-  implementation only needs bounded incremental execution.
+- The default batch threshold should be large enough to amortize database
+  overhead but small enough to keep memory, open files, lock duration, and
+  failure recovery bounded. A default around 256 MiB is acceptable
+- In `streaming` strategy, each file that needs a new canonical blob should be
+  hashed, copied, and committed before unrelated file content is read where
+  practical.
+- In `batch` strategy, the implementation may build larger action batches first,
+  but it must remain bounded and must still deduplicate across batch boundaries.
 - Dry runs compute and print the complete action list up front.
 
 Progress behavior:
@@ -214,21 +284,40 @@ Progress behavior:
 - At scan start, print either `Starting scan across N source(s)` or
   `Starting dry-run planning across N source(s)`.
 - When entering a source, print `Scanning source: <path>`.
-- During planning, periodically report processed files, new files to copy,
-  observations to record, planned actions, and skipped files when nonzero.
-- Live mode prints `Executing scan batches`, copy progress every 25 copies, and
-  a completion or error summary.
+- During planning and execution, periodically report:
+  - files discovered
+  - files processed
+  - files remaining when known
+  - bytes read for hashing
+  - bytes written for copying
+  - recent and average read speed
+  - recent and average write speed
+  - new files to copy
+  - observations to record
+  - planned/executed actions
+  - skipped files when nonzero
+- Live mode prints `Executing scan batches`, copy progress, and a completion or
+  error summary.
 - Dry-run mode prints a dry-run completion summary.
+- Progress events are emitted through an internal reporter interface, not by
+  ad hoc writes from the scanner/planner/executor. The CLI renderer writes
+  human-readable progress to stdout. Errors and diagnostics that indicate
+  failure go to stderr.
+- Design the reporter interface so a future read-only HTTP dashboard can
+  subscribe to the same structured progress events in real time without changing
+  import logic.
 
-### `media-importer scan --browse-root`
+### Browse Tree
 
-Browse mode adds a symlink overlay under `--browse-root`.
+Every live or dry-run scan plans and maintains a symlink overlay under
+`--browse-root`. This is core scan behavior, not an optional add-on.
 
-Additional behavior:
+Required behavior:
 
 - Resolve store root, browse root, source roots, and file paths to absolute
   canonical paths before computing source-relative paths or symlink targets.
-- Persist source roots in `source_roots`.
+- Persist source roots in `source_roots` before recording observations that
+  reference them.
 - Enrich each observation with:
   - resolved `source_root`
   - `source_rel_path`, relative to that source root
@@ -273,7 +362,7 @@ Idempotency:
 - If a non-symlink filesystem entry exists at the desired browse path, fail
   rather than deleting or replacing user data.
 
-Stale source cleanup in browse mode:
+Stale source cleanup:
 
 - Detect stale observations only under the source roots included in the current
   scan.
@@ -287,7 +376,7 @@ Stale source cleanup in browse mode:
 
 Overlapping source roots:
 
-- In browse mode, reject overlapping source roots before scanning.
+- Reject overlapping source roots before scanning.
 - Check overlaps among the current `--source` arguments.
 - Check overlaps between current sources and previously recorded source roots.
 - Exact same source root is allowed for rescans.
@@ -352,7 +441,7 @@ Optional filters:
 Behavior:
 
 - Open the catalog read-only.
-- Print each matching row as a Python-style dictionary to stdout.
+- Print each matching row as one JSON object per line to stdout.
 - Combine filters with `AND`.
 - If the database does not exist, return no rows and do not create it.
 
@@ -363,6 +452,9 @@ Behavior:
 - For each copy action, create the destination parent directory.
 - Copy metadata-preserving from source to a temporary path beside the final
   destination, for example `<dest>.tmp`.
+- Use a large, bounded copy buffer suitable for media files. The default should
+  be in the same order as the hashing chunk size unless platform benchmarking
+  shows otherwise.
 - Flush/fsync the temporary file.
 - Atomically replace the final destination with the temporary file.
 - If a copy fails, record that hash as failed and continue processing other
@@ -374,10 +466,12 @@ Behavior:
 ### Database Writes
 
 - Perform database mutations in transactions.
+- Acquire and refresh the run lock for mutating commands.
 - Upsert observations by `file_path`, updating all observation fields.
 - Insert blobs with `INSERT OR IGNORE` semantics.
 - Delete stale blobs by `store_path`.
-- Record source roots with `INSERT OR IGNORE`.
+- Record source roots with upsert semantics: preserve `first_seen_at` and update
+  `last_seen_at`.
 - Update browse metadata by `file_path`.
 - Delete stale observations by `file_path`.
 - If database/browse filesystem execution fails after copies, report failure
@@ -390,7 +484,8 @@ Before creating or removing a browse symlink:
 - Reject absolute `browse_rel_path`.
 - Reject any `..` component.
 - Resolve the browse root.
-- Resolve the symlink parent with `strict=False`.
+- Resolve the symlink parent without requiring the final symlink to already
+  exist.
 - Ensure the final link path is still under the resolved browse root.
 - If not, raise an error before creating directories or symlinks.
 
@@ -402,9 +497,8 @@ Removal safety:
 
 ## Important Behavioral Boundaries
 
-- Ordinary scans without `--browse-root` do not delete source observations just
-  because source files disappear. Stale source cleanup is part of browse
-  reconciliation.
+- Scans require `--browse-root`; stale source cleanup is part of browse
+  reconciliation and only applies to source roots included in the current scan.
 - `verify-store` removes catalog rows for missing canonical blobs and therefore
   may cascade-delete observations.
 - Scanner ignores symlinks in both source trees and store verification walks.
@@ -419,6 +513,9 @@ Removal safety:
 An equivalent implementation should pass tests for:
 
 - chunked BLAKE2b hashing produces stable results
+- hashing chunk size can be increased without changing digests
+- live scan keeps hash and copy operations close together for new files in
+  streaming/auto strategy
 - dry-run scan does not create store or database
 - first scan plans/adds one blob, one copy, and one observation per unique file
   content/path as appropriate
@@ -430,7 +527,9 @@ An equivalent implementation should pass tests for:
 - missing canonical store file is detected by `verify-store`
 - unindexed store files can be indexed by `verify-store`
 - query filters by extension, name substring, and hash
+- query emits JSON lines
 - browse scan creates source-relative hash-suffixed symlinks
+- scan requires a browse root
 - browse scan works with relative CLI paths
 - browse rescan is idempotent
 - browse hash suffixes prevent collisions across same relative paths
@@ -442,14 +541,20 @@ An equivalent implementation should pass tests for:
 - absolute or parent-traversing browse relative paths are rejected before any
   directory or symlink is created
 - non-symlink browse entries are never silently replaced or removed
+- `source_roots` preserves prior roots and observations reference it
+- overlapping source roots are still rejected when a prior root has no current
+  observations
+- concurrent live runs against the same catalog are rejected or wait according
+  to the selected lock behavior
+- progress reports file counts, remaining work when known, read/write bytes, and
+  read/write speeds to stdout while errors go to stderr
 
 ## Reference Commands
 
 ```sh
-pytest
-media-importer scan --store store-root --db db.sqlite --source src
-media-importer scan --store store-root --db db.sqlite --source src --dry-run
+<test command>
 media-importer scan --store store-root --browse-root browse --db db.sqlite --source src
+media-importer scan --store store-root --browse-root browse --db db.sqlite --source src --dry-run
 media-importer verify-store --store store-root --db db.sqlite
 media-importer query --db db.sqlite --ext .jpg --name vacation
 ```
