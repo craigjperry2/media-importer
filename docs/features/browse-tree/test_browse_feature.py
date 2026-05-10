@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from media_importer.catalog import Catalog
@@ -28,21 +29,23 @@ def _browse_entries(root: str) -> list[str]:
 def _run_browse_scan(
     db_path: str, store_dir: str, browse_root: str, sources: list[str]
 ) -> Catalog:
-    catalog = Catalog(db_path)
-    planner = _make_browse_planner(catalog, store_dir, browse_root)
-    actions = _plan_scan_actions(catalog, planner, sources)
-    executor = _make_browse_executor(catalog, store_dir, browse_root)
+    catalog = Catalog(Path(db_path))
+    planner = _make_browse_planner(catalog, Path(store_dir), Path(browse_root))
+    actions = _plan_scan_actions(catalog, planner, [Path(s) for s in sources])
+    executor = _make_browse_executor(catalog, Path(store_dir), Path(browse_root))
     assert executor.execute(actions)
     return catalog
 
 
-def _make_browse_planner(catalog: Catalog, store_dir: str, browse_root: str) -> Planner:
+def _make_browse_planner(
+    catalog: Catalog, store_dir: Path, browse_root: Path
+) -> Planner:
     planner_cls: Any = Planner
     return planner_cls(catalog, store_dir, browse_root=browse_root)
 
 
 def _make_browse_executor(
-    catalog: Catalog, store_dir: str, browse_root: str
+    catalog: Catalog, store_dir: Path, browse_root: Path
 ) -> Executor:
     executor_cls: Any = Executor
     return executor_cls(catalog, store_dir, browse_root=browse_root)

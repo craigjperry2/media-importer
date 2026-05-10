@@ -27,9 +27,10 @@ canonical blob.
 2. Re-running the same scan is idempotent.
 3. Path collisions are resolved as:
    - first file keeps `name.ext`
-   - later collisions become `1_name.ext`, `2_name.ext`, etc.
-4. If a previously scanned source file disappears, its browse symlink is removed
-and empty browse directories are pruned.
+   - later collisions become `name_[hash].ext` where `[hash]` is a short
+     snippet (e.g., 7 chars) of the file's hash.
+4. If a previously scanned source file disappears, its browse symlink is
+removed and empty browse directories are pruned.
 5. `verify-store` removes browse symlinks for blobs that no longer exist in the
 canonical store.
 6. `scan --dry-run --browse-root ...` plans the work but does not modify the
@@ -58,8 +59,8 @@ Recommended new `source_files` columns:
 Rationale:
 
 - `file_path` is already the stable key for an observation.
-- each observation needs to remember which source root it came from and what its
-  natural source-relative path is
+- each observation needs to remember which source root it came from and what
+  its natural source-relative path is
 - `browse_rel_path` lets rescans remain stable and lets the planner compare
   desired vs current browse placement
 
@@ -123,8 +124,8 @@ Notes:
 - `get_stale_observations(...)` should return rows under the scanned source
   roots whose `last_seen_at` is older than the current scan timestamp.
 - `get_live_observations_for_sources(...)` should return only rows for the
-  currently scanned roots and should include enough ordering information to make
-  browse-path assignment deterministic.
+  currently scanned roots and should include enough ordering information to
+  make browse-path assignment deterministic.
 
 ## Required CLI changes
 
@@ -202,7 +203,8 @@ For each live observation in the current scanned roots:
 
 1. start from `source_rel_path`
 2. if that relative path is unused in the browse tree assignment set, keep it
-3. if occupied, append a short hash suffix (e.g., the first 7 chars of `file_hash`) to the file stem, before the extension.
+3. if occupied, append a short hash suffix (e.g., the first 7 chars of
+`file_hash`) to the file stem, before the extension.
 
 Example:
 
@@ -210,7 +212,8 @@ Example:
 - `Movies/zabba/zabba_a1b2c3d.mp4`
 - `Movies/zabba/zabba_e5f6g7h.mp4`
 
-To ensure the first source listed by the user wins the unmodified name (which matches the tests), assign browse paths in this deterministic order:
+To ensure the first source listed by the user wins the unmodified name (which
+matches the tests), assign browse paths in this deterministic order:
 
 1. source root order from the current `--source` argument list
 2. `source_rel_path.as_posix()`
@@ -276,8 +279,8 @@ Recommended symlink behavior:
   directory to the store file
 - if the symlink already exists and points to the correct target, do nothing
 - if a wrong symlink exists, replace it
-- if a non-symlink filesystem entry exists at the browse path, raise an explicit
-  error instead of deleting user data silently
+- if a non-symlink filesystem entry exists at the browse path, raise an
+  explicit error instead of deleting user data silently
 
 ### 3. Empty directory cleanup
 
@@ -375,8 +378,8 @@ This keeps dry-run honest and avoids modifying the filesystem.
 - duplicate file content from different source paths: each source path still
   gets its own browse symlink, even if both point to the same canonical blob
 - rescans with no changes must not churn `browse_rel_path`
-- stale browse cleanup must only affect the source roots included in the current
-  scan
+- stale browse cleanup must only affect the source roots included in the
+  current scan
 - `verify-store` must clean browse links even though it only receives `--store`
   and `--db`
 
@@ -403,7 +406,6 @@ Run these after implementation:
 - `tests/test_executor.py`
 - `tests/test_catalog.py`
 
-The implementation should make the new tests pass by adding the missing feature,
-not by softening the assertions.
-e,
-not by softening the assertions.
+The implementation should make the new tests pass by adding the missing
+feature, not by softening the assertions.
+

@@ -14,8 +14,8 @@ files in the canonical hash-based store.
 - `scan` accepts `--store`, `--db`, repeated `--source`, `--dry-run`, and
   `--rehash-all` in `src/media_importer/cli.py`.
 - Planning currently produces `AddBlobAction`, `CopyFileAction`, and
-  `InsertObservationAction`; execution copies canonical files into the store and
-  upserts `source_files`.
+  `InsertObservationAction`; execution copies canonical files into the store
+  and upserts `source_files`.
 - `source_files` stores absolute source path, file name, format, size, mtime,
   hash, and `last_seen_at`, but it does not persist source-root-relative paths
   or any browse-tree metadata.
@@ -32,18 +32,18 @@ omitted, behavior remains unchanged.
 deterministically, most likely by extending `source_files` with source-root and
 source-relative browse path fields rather than creating a parallel ORM-like
 layer.
-3. Add explicit action types for browse-tree maintenance so dry-run output shows
-planned symlink work and all side-effects remain in `executor.py`.
+3. Add explicit action types for browse-tree maintenance so dry-run output
+shows planned symlink work and all side-effects remain in `executor.py`.
 4. When browse mode is enabled, plan creation/update of symlinks pointing at
 canonical store blobs using the source-relative path from the scanned root.
 5. Prune obsolete browse links for files that are no longer present under the
 scanned source roots, and remove empty directories created only for browse
 links.
-6. Extend `verify-store` handling so missing canonical blobs do not leave broken
-browse entries behind.
+6. Extend `verify-store` handling so missing canonical blobs do not leave
+broken browse entries behind.
 7. Resolve browse-path collisions within a directory by keeping the first path
-unchanged and prefixing later conflicting filenames with `1_`, `2_`, and so on
-until a free name is found.
+unchanged and appending a short snippet of the file's content hash (e.g.,
+`_[hash]`) to later conflicting filenames before their extension.
 
 ## Implementation todos
 
@@ -80,11 +80,15 @@ until a free name is found.
   pruning, dry-run output, and verify-store interaction.
 - Document the new CLI option and expected behavior in `README.md`.
 - Add collision tests proving that the first matching path keeps its original
-  name and later conflicts become `1_<name>`, `2_<name>`, etc.
+  name and later conflicts become `<name>_[hash].ext`.
 
 ## Resolved behavior
 
-- If two or more observations map to the same browse-relative path, the first one keeps the unmodified filename.
-- Later collisions in that same directory are deconflicted statelessly by appending a short snippet of the file's content hash (e.g., the first 7 characters) to the filename, before the extension.
-- This stateless approach ensures that symlink names remain perfectly stable even if other conflicting files are added or removed.
-unnecessarily.
+- If two or more observations map to the same browse-relative path, the first
+  one keeps the unmodified filename.
+- Later collisions in that same directory are deconflicted statelessly by
+  appending a short snippet of the file's content hash (e.g., the first 7
+  characters) to the filename, before the extension.
+- This stateless approach ensures that symlink names remain perfectly stable
+  even if other conflicting files are added or removed.
+
