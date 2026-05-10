@@ -61,7 +61,7 @@ unchanged and appending a short snippet of the file's content hash (e.g.,
 
 3. **Plan browse actions**
 - Add action dataclasses for symlink creation/update and symlink removal.
-- Compute browse-relative paths from each scanned source root.
+- Compute browse-relative paths from each scanned source root (ensuring source roots are first resolved/canonicalized to absolute paths before storing or comparing them to avoid `ValueError` during path resolution).
 - Detect existing/stale browse entries so repeated scans stay idempotent.
 
 4. **Execute browse actions**

@@ -171,12 +171,13 @@ persistence. It should not perform filesystem writes.
 Before `plan_observation(...)` is called, each scanned observation should be
 enriched with:
 
-- `source_root`
+- `source_root` (must be resolved/canonicalized to an absolute path first)
 - `source_rel_path`
 
 Use:
 
-- `source_rel_path = obs.file_path.relative_to(source_root)`
+- `resolved_root = source_root.resolve()`
+- `source_rel_path = obs.file_path.relative_to(resolved_root)`
 
 ### 2. Add a post-scan browse reconciliation phase
 
