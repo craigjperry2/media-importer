@@ -70,7 +70,7 @@ media-importer scan \
 
 During `scan`, the CLI reports count-based progress as it walks sources, plans work, and processes file copies so long-running runs stay visible.
 
-To maintain a human-browseable symlink overlay alongside the hash-based store,
+To maintain a human-browsable symlink overlay alongside the hash-based store,
 pass `--browse-root`. The browse tree mirrors each source-relative path, but
 the file name is suffixed with the first seven characters of the content hash to
 keep paths stable and collision-free:
