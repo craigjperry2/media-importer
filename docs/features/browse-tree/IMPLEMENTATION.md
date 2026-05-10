@@ -124,16 +124,13 @@ Add catalog helpers for planner use. Recommended helpers:
 - `get_observations_for_hash(file_hash: str) -> list[FileObservation]`
 - `get_stale_observations(source_roots: list[Path], last_seen_at: float) ->
   list[FileObservation]`
-- `get_live_observations_for_sources(source_roots: list[Path]) ->
-  list[FileObservation]`
+- `get_all_live_observations() -> list[FileObservation]`
 
 Notes:
 
 - `get_stale_observations(...)` should return rows under the scanned source
   roots whose `last_seen_at` is older than the current scan timestamp.
-- `get_live_observations_for_sources(...)` should return only rows for the
-  currently scanned roots and should include enough ordering information to
-  make browse-path assignment deterministic.
+- `get_all_live_observations()` should return all rows across all source roots and should include enough ordering information to make browse-path assignment deterministic.
 
 ## Required CLI changes
 
@@ -208,7 +205,7 @@ values
 
 Collision handling must match the tests and remain stable.
 
-For each live observation in the current scanned roots:
+For each live observation across all source roots (from the catalog merged with the current scan):
 
 1. start from `source_rel_path`
 2. if that relative path is unused in the browse tree assignment set, keep it
@@ -221,12 +218,13 @@ Example:
 - `Movies/zabba/zabba_a1b2c3d.mp4`
 - `Movies/zabba/zabba_e5f6g7h.mp4`
 
-To ensure the first source listed by the user wins the unmodified name (which
+To ensure stability and that the first source listed by the user wins the unmodified name (which
 matches the tests), assign browse paths in this deterministic order:
 
-1. source root order from the current `--source` argument list
-2. `source_rel_path.as_posix()`
-3. `file_path.as_posix()`
+1. observation is from a previously scanned root (preserves existing assignments)
+2. source root order from the current `--source` argument list
+3. `source_rel_path.as_posix()`
+4. `file_path.as_posix()`
 
 ### 4. Stale source handling
 
