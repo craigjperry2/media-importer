@@ -32,7 +32,7 @@ class Planner:
     def validate_source_roots(self, source_roots: list[Path]) -> list[Path]:
         resolved_roots = [source.resolve() for source in source_roots]
         self._raise_for_overlaps(resolved_roots)
-        existing_roots = self.catalog.get_source_roots()
+        existing_roots = [root.resolve() for root in self.catalog.get_source_roots()]
         for root in resolved_roots:
             for existing_root in existing_roots:
                 if root == existing_root:
