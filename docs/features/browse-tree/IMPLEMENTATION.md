@@ -290,7 +290,8 @@ Recommended symlink behavior:
 - if the symlink already exists and points to the correct target, do nothing
 - if a wrong symlink exists, replace it
 - if a non-symlink filesystem entry exists at the browse path, raise an
-  explicit error instead of deleting user data silently
+  explicit error instead of deleting user data silently. Ensure acceptance
+  test coverage of this safety property.
 
 ### 3. Empty directory cleanup
 
