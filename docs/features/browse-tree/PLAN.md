@@ -44,6 +44,7 @@ links.
 broken browse entries behind.
 7. Prevent browse-path collisions statelessly by always appending a short snippet of
 the file's content hash (e.g., `_[hash]`) to the filename before the extension.
+8. Reject overlapping source roots. If the user attempts to scan a source root that is a parent or child of another source root (either in the same scan or across previous scans recorded in the catalog), the scan must be aborted. This prevents a single physical file from mapping to multiple differing source-relative paths, which would corrupt the `file_path` uniqueness assumption.
 
 ## Implementation todos
 

@@ -1,5 +1,7 @@
 import os
 import sys
+
+import pytest
 from pathlib import Path
 from typing import Any
 
@@ -315,3 +317,24 @@ def test_scan_dry_run_correctly_plans_against_existing_catalog(
 
     assert "Dry run:" in captured.out
     assert expected_suffixed_name in captured.out
+
+
+def test_scan_rejects_overlapping_source_roots(workspace):
+    store_dir = os.path.join(workspace, "store")
+    browse_root = os.path.join(workspace, "browse")
+    db_path = os.path.join(workspace, "db.sqlite")
+    source_parent = os.path.join(workspace, "source")
+    source_child = os.path.join(workspace, "source", "child")
+
+    os.makedirs(source_child)
+
+    # Same scan overlap
+    with pytest.raises(ValueError, match="overlap"):
+        _run_browse_scan(db_path, store_dir, browse_root, [source_parent, source_child])
+
+    # Sequential scan overlap
+    catalog = _run_browse_scan(db_path, store_dir, browse_root, [source_child])
+    catalog.close()
+
+    with pytest.raises(ValueError, match="overlap"):
+        _run_browse_scan(db_path, store_dir, browse_root, [source_parent])

@@ -218,7 +218,18 @@ Example:
 - `Movies/zabba/zabba_a1b2c3d.mp4`
 - `Movies/zabba/zabba_e5f6g7h.mp4`
 
-### 4. Stale source handling
+### 4. Overlapping source roots prevention
+
+To protect the unique `file_path` assumption, a single physical file must not be scanned under multiple conflicting source roots (e.g., scanning `/photos` and `/photos/2024`).
+
+Update the planner (or CLI) to validate source roots before scanning:
+
+1. Check for overlaps among the current scan's `--source` arguments.
+2. Query the catalog for all existing unique `source_root` values.
+3. Check for overlaps between the current scan's `--source` arguments and the catalog's existing source roots.
+4. If an overlap is detected (where one root is a parent or child of another), raise a `ValueError` with a clear message and abort the scan. Identical source roots (exact matches) are allowed for rescans.
+
+### 5. Stale source handling
 
 The current scan flow only updates observations it sees. To satisfy the pruning
 test, add a post-scan stale cleanup step.
@@ -231,7 +242,7 @@ scanned_at` is stale for this run and should be removed from:
 - browse tree
 - `source_files`
 
-### 5. Verify-store handling
+### 6. Verify-store handling
 
 `plan_verify_store()` must also clean browse entries when a canonical blob is
 missing.
@@ -373,6 +384,7 @@ This keeps dry-run honest and avoids modifying the filesystem.
 
 ## Edge cases to handle carefully
 
+- overlapping source roots: must be explicitly rejected before scanning begins
 - multiple source roots with the same relative path
 - duplicate file content from different source paths: each source path still
   gets its own browse symlink, even if both point to the same canonical blob
