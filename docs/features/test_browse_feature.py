@@ -82,7 +82,7 @@ def test_rescan_with_browse_root_is_idempotent(workspace):
     assert _browse_entries(browse_root) == ["Movies/zabba/zabba.mp4"]
 
 
-def test_colliding_browse_paths_are_deconflicted_with_numbered_prefixes(workspace):
+def test_colliding_browse_paths_are_deconflicted_with_hash_suffixes(workspace):
     store_dir = os.path.join(workspace, "store")
     browse_root = os.path.join(workspace, "browse")
     db_path = os.path.join(workspace, "db.sqlite")
@@ -100,12 +100,15 @@ def test_colliding_browse_paths_are_deconflicted_with_numbered_prefixes(workspac
     first_store_path = os.path.join(store_dir, first_hash[:2], f"{first_hash}.mp4")
     second_store_path = os.path.join(store_dir, second_hash[:2], f"{second_hash}.mp4")
     original_browse_path = os.path.join(browse_root, "Movies", "zabba", "zabba.mp4")
-    numbered_browse_path = os.path.join(browse_root, "Movies", "zabba", "1_zabba.mp4")
+    short_hash = second_hash[:7]
+    hash_suffixed_browse_path = os.path.join(
+        browse_root, "Movies", "zabba", f"zabba_{short_hash}.mp4"
+    )
 
     assert os.path.islink(original_browse_path)
-    assert os.path.islink(numbered_browse_path)
+    assert os.path.islink(hash_suffixed_browse_path)
     assert os.path.samefile(original_browse_path, first_store_path)
-    assert os.path.samefile(numbered_browse_path, second_store_path)
+    assert os.path.samefile(hash_suffixed_browse_path, second_store_path)
 
 
 def test_rescan_prunes_missing_browse_symlink_and_empty_directories(workspace):

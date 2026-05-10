@@ -84,10 +84,7 @@ until a free name is found.
 
 ## Resolved behavior
 
-- If two or more observations map to the same browse-relative path, the first
-  one keeps the unmodified filename.
-- Later collisions in that same directory are deconflicted by prefixing the
-  filename with an incrementing number (`1_`, `2_`, ...), checking for the next
-  available name each time.
-- The implementation should make that numbering deterministic so repeated scans
-  do not churn symlink names unnecessarily.
+- If two or more observations map to the same browse-relative path, the first one keeps the unmodified filename.
+- Later collisions in that same directory are deconflicted statelessly by appending a short snippet of the file's content hash (e.g., the first 7 characters) to the filename, before the extension.
+- This stateless approach ensures that symlink names remain perfectly stable even if other conflicting files are added or removed.
+unnecessarily.

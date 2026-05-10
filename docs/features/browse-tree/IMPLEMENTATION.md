@@ -196,29 +196,25 @@ values
 
 ### 3. Collision algorithm
 
-Collision handling must match the tests and remain deterministic.
+Collision handling must match the tests and remain stable.
 
 For each live observation in the current scanned roots:
 
 1. start from `source_rel_path`
 2. if that relative path is unused in the browse tree assignment set, keep it
-3. if occupied, prefix the filename with `1_`
-4. if still occupied, try `2_`, then `3_`, etc.
+3. if occupied, append a short hash suffix (e.g., the first 7 chars of `file_hash`) to the file stem, before the extension.
 
 Example:
 
 - `Movies/zabba/zabba.mp4`
-- `Movies/zabba/1_zabba.mp4`
-- `Movies/zabba/2_zabba.mp4`
+- `Movies/zabba/zabba_a1b2c3d.mp4`
+- `Movies/zabba/zabba_e5f6g7h.mp4`
 
-Deterministic ordering matters. Recommended assignment order:
+To ensure the first source listed by the user wins the unmodified name (which matches the tests), assign browse paths in this deterministic order:
 
 1. source root order from the current `--source` argument list
 2. `source_rel_path.as_posix()`
 3. `file_path.as_posix()`
-
-That ensures the first source listed by the user wins the unmodified name, which
-matches the tests.
 
 ### 4. Stale source handling
 
@@ -408,4 +404,6 @@ Run these after implementation:
 - `tests/test_catalog.py`
 
 The implementation should make the new tests pass by adding the missing feature,
+not by softening the assertions.
+e,
 not by softening the assertions.
