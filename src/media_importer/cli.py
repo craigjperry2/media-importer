@@ -9,7 +9,13 @@ from pathlib import Path
 from .catalog import Catalog
 from .executor import ExecutionResult, Executor
 from .hashing import calculate_hash
-from .models import Action, CopyFileAction, FileObservation, InsertObservationAction
+from .models import (
+    Action,
+    CopyFileAction,
+    FileObservation,
+    InsertObservationAction,
+    RecordSourceRootAction,
+)
 from .planner import Planner
 from .scanner import scan_directory
 
@@ -124,14 +130,25 @@ def _resolve_observation_hash(
         and existing_obs.size_bytes == obs.size_bytes
         and existing_obs.mtime == obs.mtime
     ):
-        return replace(obs, file_hash=existing_obs.file_hash)
+        return replace(
+            obs,
+            file_hash=existing_obs.file_hash,
+            browse_root=obs.browse_root or existing_obs.browse_root,
+            browse_rel_path=existing_obs.browse_rel_path,
+        )
 
     try:
         file_hash = calculate_hash(obs.file_path)
     except OSError:
         return None
 
-    return replace(obs, file_hash=file_hash)
+    return replace(
+        obs,
+        file_hash=file_hash,
+        browse_root=obs.browse_root
+        or (existing_obs.browse_root if existing_obs else None),
+        browse_rel_path=existing_obs.browse_rel_path if existing_obs else None,
+    )
 
 
 def _blob_exists(catalog: Catalog, file_hash: str, known_blob_hashes: set[str]) -> bool:
@@ -147,8 +164,30 @@ def _iter_source_observations(
     sources: Iterable[Path],
 ) -> Iterator[tuple[Path, FileObservation]]:
     for source in sources:
-        for observation in scan_directory(source):
+        resolved_source = source.resolve()
+        for observation in scan_directory(resolved_source):
             yield source, observation
+
+
+def _prepare_scan_sources(planner: Planner, sources: Iterable[Path]) -> list[Path]:
+    source_list = list(sources)
+    if planner.browse_root is None:
+        return source_list
+    return planner.validate_source_roots(source_list)
+
+
+def _enrich_observation(
+    obs: FileObservation, source_root: Path, browse_root: Path | None
+) -> FileObservation:
+    resolved_source_root = source_root.resolve()
+    resolved_file_path = obs.file_path.resolve()
+    return replace(
+        obs,
+        file_path=resolved_file_path,
+        source_root=resolved_source_root,
+        source_rel_path=resolved_file_path.relative_to(resolved_source_root),
+        browse_root=browse_root,
+    )
 
 
 @dataclass
@@ -190,11 +229,11 @@ def _add_obs_to_batch(
     known_blob_hashes: set[str],
     progress: ScanProgress,
     now: float,
-) -> bool:
+) -> FileObservation | None:
     hashed_obs = _resolve_observation_hash(catalog, obs, rehash_all)
     if hashed_obs is None or hashed_obs.file_hash is None:
         progress.skipped_files += 1
-        return False
+        return None
     file_hash = hashed_obs.file_hash
     blob_exists = file_hash in batch.blob_hashes or _blob_exists(
         catalog, file_hash, known_blob_hashes
@@ -211,7 +250,7 @@ def _add_obs_to_batch(
         batch.blob_hashes.add(file_hash)
         batch.new_hashes.add(file_hash)
     batch.bytes += obs.size_bytes
-    return True
+    return replace(hashed_obs, last_seen_at=now)
 
 
 def _plan_scan_actions_with_progress(
@@ -226,14 +265,24 @@ def _plan_scan_actions_with_progress(
     progress = ScanProgress()
     now = time.time()
     current_source: Path | None = None
+    resolved_sources = _prepare_scan_sources(planner, sources)
+    current_scan_observations: list[FileObservation] = []
+    if planner.browse_root is not None:
+        root_actions: list[Action] = [
+            RecordSourceRootAction(source_root=source.resolve())
+            for source in resolved_sources
+        ]
+        actions.extend(root_actions)
+        progress.planned_actions += len(root_actions)
 
-    for source, obs in _iter_source_observations(sources):
+    for source, obs in _iter_source_observations(resolved_sources):
         if reporter is not None and source != current_source:
             reporter.source_started(source)
             current_source = source
 
         progress.processed_files += 1
-        hashed_obs = _resolve_observation_hash(catalog, obs, rehash_all)
+        enriched_obs = _enrich_observation(obs, source, planner.browse_root)
+        hashed_obs = _resolve_observation_hash(catalog, enriched_obs, rehash_all)
         if hashed_obs is None or hashed_obs.file_hash is None:
             progress.skipped_files += 1
             if reporter is not None:
@@ -246,6 +295,7 @@ def _plan_scan_actions_with_progress(
             hashed_obs, blob_exists=blob_exists, now=now
         )
         actions.extend(observation_actions)
+        current_scan_observations.append(replace(hashed_obs, last_seen_at=now))
         copy_actions, insert_actions = _count_scan_actions(observation_actions)
         progress.planned_actions += len(observation_actions)
         progress.new_files_to_copy += copy_actions
@@ -253,6 +303,13 @@ def _plan_scan_actions_with_progress(
         known_blob_hashes.add(file_hash)
         if reporter is not None:
             reporter.planning_progress(progress)
+
+    if planner.browse_root is not None:
+        browse_actions = planner.plan_browse_reconciliation(
+            resolved_sources, now, current_scan_observations
+        )
+        actions.extend(browse_actions)
+        progress.planned_actions += len(browse_actions)
 
     if reporter is not None:
         reporter.planning_complete(progress)
@@ -293,6 +350,15 @@ def _execute_scan(
     current_source: Path | None = None
     db_committed = True
     failed_hashes: set[str] = set()
+    resolved_sources = _prepare_scan_sources(planner, sources)
+    current_scan_observations: list[FileObservation] = []
+    if planner.browse_root is not None:
+        root_actions: list[Action] = [
+            RecordSourceRootAction(source_root=source.resolve())
+            for source in resolved_sources
+        ]
+        db_committed = db_committed and executor.execute(root_actions)
+        progress.planned_actions += len(root_actions)
 
     def on_copy_processed() -> None:
         nonlocal copy_actions_processed
@@ -303,18 +369,28 @@ def _execute_scan(
     if reporter is not None:
         reporter.execution_started()
 
-    for source, obs in _iter_source_observations(sources):
+    for source, obs in _iter_source_observations(resolved_sources):
         if reporter is not None and source != current_source:
             reporter.source_started(source)
             current_source = source
 
         progress.processed_files += 1
-        added = _add_obs_to_batch(
-            obs, catalog, planner, rehash_all, batch, known_blob_hashes, progress, now
+        enriched_obs = _enrich_observation(obs, source, planner.browse_root)
+        planned_obs = _add_obs_to_batch(
+            enriched_obs,
+            catalog,
+            planner,
+            rehash_all,
+            batch,
+            known_blob_hashes,
+            progress,
+            now,
         )
+        if planned_obs is not None:
+            current_scan_observations.append(planned_obs)
         if reporter is not None:
             reporter.planning_progress(progress)
-        if added and batch.bytes >= max_batch_bytes:
+        if planned_obs is not None and batch.bytes >= max_batch_bytes:
             db_committed = db_committed and _flush_scan_batch(
                 batch, executor, known_blob_hashes, failed_hashes, on_copy_processed
             )
@@ -326,6 +402,21 @@ def _execute_scan(
         failed_hashes=frozenset(failed_hashes),
         db_committed=db_committed,
     )
+    if result.db_committed and planner.browse_root is not None:
+        browse_observations = [
+            observation
+            for observation in current_scan_observations
+            if observation.file_hash not in failed_hashes
+        ]
+        browse_actions = planner.plan_browse_reconciliation(
+            resolved_sources, now, browse_observations
+        )
+        progress.planned_actions += len(browse_actions)
+        browse_result = executor.execute_with_result(browse_actions)
+        result = ExecutionResult(
+            failed_hashes=result.failed_hashes | browse_result.failed_hashes,
+            db_committed=result.db_committed and browse_result.db_committed,
+        )
     if reporter is not None:
         reporter.planning_complete(progress)
         reporter.execution_complete(progress, copy_actions_processed, result)
@@ -334,7 +425,7 @@ def _execute_scan(
 
 def _handle_scan(args: argparse.Namespace) -> None:
     catalog = Catalog(args.db, read_only=args.dry_run)
-    planner = Planner(catalog, args.store)
+    planner = Planner(catalog, args.store, browse_root=args.browse_root)
     reporter = ScanProgressReporter()
     reporter.planning_started(args.source, dry_run=args.dry_run)
 
@@ -351,7 +442,7 @@ def _handle_scan(args: argparse.Namespace) -> None:
         for action in actions:
             print(action)
     else:
-        executor = Executor(catalog, args.store)
+        executor = Executor(catalog, args.store, browse_root=args.browse_root)
         result, _, _ = _execute_scan(
             catalog,
             planner,
@@ -416,6 +507,11 @@ def main() -> None:
     )
     scan_parser.add_argument(
         "--dry-run", action="store_true", help="Plan only, make no changes"
+    )
+    scan_parser.add_argument(
+        "--browse-root",
+        type=Path,
+        help="Optional root for a source-relative symlink browse tree",
     )
     scan_parser.add_argument(
         "--rehash-all", action="store_true", help="Force rehashing of all files"

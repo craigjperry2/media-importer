@@ -12,8 +12,13 @@ from .models import (
     Action,
     AddBlobAction,
     CopyFileAction,
+    CreateOrUpdateBrowseSymlinkAction,
+    DeleteObservationAction,
     InsertObservationAction,
     MarkStaleAction,
+    RecordSourceRootAction,
+    RemoveBrowseSymlinkAction,
+    UpdateBrowsePathAction,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,9 +35,12 @@ class ExecutionResult:
 
 
 class Executor:
-    def __init__(self, catalog: Catalog, store_dir: Path):
+    def __init__(
+        self, catalog: Catalog, store_dir: Path, browse_root: Path | None = None
+    ):
         self.catalog = catalog
-        self.store_dir = store_dir
+        self.store_dir = store_dir.resolve()
+        self.browse_root = browse_root.resolve() if browse_root is not None else None
 
     def _copy_files(
         self,
@@ -61,6 +69,52 @@ class Executor:
                     on_copy_processed()
         return failed_hashes
 
+    def _apply_browse_filesystem_actions(self, actions: List[Action]) -> None:
+        for action in actions:
+            if isinstance(action, RemoveBrowseSymlinkAction):
+                self._remove_browse_symlink(action)
+            elif isinstance(action, CreateOrUpdateBrowseSymlinkAction):
+                self._create_or_update_browse_symlink(action)
+
+    def _create_or_update_browse_symlink(
+        self, action: CreateOrUpdateBrowseSymlinkAction
+    ) -> None:
+        link_path = action.browse_root / action.browse_rel_path
+        target_path = action.target_store_path.resolve()
+        link_path.parent.mkdir(parents=True, exist_ok=True)
+        relative_target = Path(os.path.relpath(target_path, link_path.parent))
+
+        if link_path.is_symlink():
+            if Path(os.readlink(link_path)) == relative_target:
+                return
+            link_path.unlink()
+        elif link_path.exists():
+            raise FileExistsError(
+                f"Refusing to replace non-symlink browse entry: {link_path}"
+            )
+
+        link_path.symlink_to(relative_target)
+
+    def _remove_browse_symlink(self, action: RemoveBrowseSymlinkAction) -> None:
+        link_path = action.browse_root / action.browse_rel_path
+        if link_path.is_symlink():
+            link_path.unlink()
+            self._prune_empty_browse_dirs(link_path.parent, action.browse_root)
+        elif link_path.exists():
+            raise FileExistsError(
+                f"Refusing to remove non-symlink browse entry: {link_path}"
+            )
+
+    def _prune_empty_browse_dirs(self, path: Path, browse_root: Path) -> None:
+        current = path
+        root = browse_root.resolve()
+        while current.resolve() != root:
+            try:
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
+
     def _db_operations(
         self,
         conn: sqlite3.Connection,
@@ -86,15 +140,23 @@ class Executor:
                     continue
                 conn.execute(
                     """
-                    INSERT INTO source_files (file_path, file_name, file_format, size_bytes, mtime, file_hash, last_seen_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO source_files (
+                        file_path, file_name, file_format, size_bytes, mtime,
+                        file_hash, last_seen_at, source_root, source_rel_path,
+                        browse_root, browse_rel_path
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(file_path) DO UPDATE SET
                         file_name=excluded.file_name,
                         file_format=excluded.file_format,
                         size_bytes=excluded.size_bytes,
                         mtime=excluded.mtime,
                         file_hash=excluded.file_hash,
-                        last_seen_at=excluded.last_seen_at
+                        last_seen_at=excluded.last_seen_at,
+                        source_root=excluded.source_root,
+                        source_rel_path=excluded.source_rel_path,
+                        browse_root=excluded.browse_root,
+                        browse_rel_path=excluded.browse_rel_path
                 """,
                     (
                         str(obs.file_path),
@@ -104,11 +166,38 @@ class Executor:
                         obs.mtime,
                         obs.file_hash,
                         obs.last_seen_at,
+                        str(obs.source_root) if obs.source_root else None,
+                        str(obs.source_rel_path) if obs.source_rel_path else None,
+                        str(obs.browse_root) if obs.browse_root else None,
+                        str(obs.browse_rel_path) if obs.browse_rel_path else None,
                     ),
                 )
             elif isinstance(action, MarkStaleAction):
                 conn.execute(
                     "DELETE FROM blobs WHERE store_path = ?", (str(action.file_path),)
+                )
+            elif isinstance(action, RecordSourceRootAction):
+                conn.execute(
+                    "INSERT OR IGNORE INTO source_roots (source_root) VALUES (?)",
+                    (str(action.source_root),),
+                )
+            elif isinstance(action, UpdateBrowsePathAction):
+                conn.execute(
+                    """
+                    UPDATE source_files
+                    SET browse_root = ?, browse_rel_path = ?
+                    WHERE file_path = ?
+                    """,
+                    (
+                        str(action.browse_root) if action.browse_root else None,
+                        str(action.browse_rel_path) if action.browse_rel_path else None,
+                        str(action.file_path),
+                    ),
+                )
+            elif isinstance(action, DeleteObservationAction):
+                conn.execute(
+                    "DELETE FROM source_files WHERE file_path = ?",
+                    (str(action.file_path),),
                 )
 
     def execute_with_result(
@@ -119,6 +208,7 @@ class Executor:
         failed_hashes = self._copy_files(actions, on_copy_processed=on_copy_processed)
         db_committed = False
         try:
+            self._apply_browse_filesystem_actions(actions)
             self.catalog.execute_in_transaction(
                 lambda conn: self._db_operations(conn, actions, failed_hashes)
             )

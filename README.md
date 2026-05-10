@@ -70,6 +70,23 @@ media-importer scan \
 
 During `scan`, the CLI reports count-based progress as it walks sources, plans work, and processes file copies so long-running runs stay visible.
 
+To maintain a human-browseable symlink overlay alongside the hash-based store,
+pass `--browse-root`. The browse tree mirrors each source-relative path, but
+the file name is suffixed with the first seven characters of the content hash to
+keep paths stable and collision-free:
+
+```sh
+media-importer scan \
+  --store /path/to/store \
+  --browse-root /path/to/browse \
+  --db /path/to/catalog.db \
+  --source /path/to/source
+```
+
+The real files remain in the canonical store. The browse root contains only
+symlinks, and rescans remove stale links for files that disappeared from the
+scanned source roots.
+
 Use `--dry-run` to observe planned changes without writing to disk or database:
 ```sh
 media-importer scan --store store --db catalog.db --source src_dir --dry-run
