@@ -189,7 +189,7 @@ observations have been recorded or planned.
 
 Add a planner method along these lines:
 
-- `plan_browse_reconciliation(source_roots: list[Path], scanned_at: float) ->
+- `plan_browse_reconciliation(source_roots: list[Path], scanned_at: float, current_scan_observations: list[FileObservation]) ->
   list[Action]`
 
 This method should:
@@ -197,10 +197,10 @@ This method should:
 1. find stale observations for the scanned roots
 2. emit actions to remove their browse symlinks
 3. emit actions to delete those stale observation rows
-4. compute the desired browse path for every remaining live observation in the
-scanned roots
-5. compare desired browse path vs stored `browse_rel_path`
-6. emit actions to create/update symlinks and persist new `browse_rel_path`
+4. construct an in-memory merged view of the catalog's existing live observations plus the `current_scan_observations` (crucial for dry runs since planned rows aren't in the DB yet)
+5. compute the desired browse path for every observation in this merged view
+6. compare desired browse path vs stored `browse_rel_path`
+7. emit actions to create/update symlinks and persist new `browse_rel_path`
 values
 
 ### 3. Collision algorithm

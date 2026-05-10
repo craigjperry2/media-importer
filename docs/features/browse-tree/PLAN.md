@@ -36,7 +36,7 @@ symlinks without requiring the user to pass `--browse-root`.
 3. Add explicit action types for browse-tree maintenance so dry-run output
 shows planned symlink work and all side-effects remain in `executor.py`.
 4. When browse mode is enabled, plan creation/update of symlinks pointing at
-canonical store blobs using the source-relative path from the scanned root.
+canonical store blobs using the source-relative path from the scanned root. Because dry-run mode does not write observations to the database during the scan phase, the planner must construct an in-memory merged view of existing catalog rows plus the newly scanned observations to correctly resolve collisions and assign paths.
 5. Prune obsolete browse links for files that are no longer present under the
 scanned source roots, and remove empty directories created only for browse
 links.
