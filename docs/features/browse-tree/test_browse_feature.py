@@ -74,7 +74,7 @@ def test_scan_with_browse_root_creates_source_relative_symlink_tree(workspace):
     assert os.path.samefile(browse_path, canonical_path)
 
 
-def test_scan_with_relative_source_path_resolves_correctly(workspace, monkeypatch):
+def test_scan_with_relative_paths_resolves_correctly(workspace, monkeypatch):
     store_dir = os.path.join(workspace, "store")
     browse_root = os.path.join(workspace, "browse")
     db_path = os.path.join(workspace, "db.sqlite")
@@ -84,8 +84,10 @@ def test_scan_with_relative_source_path_resolves_correctly(workspace, monkeypatc
 
     monkeypatch.chdir(workspace)
     rel_source_dir = os.path.relpath(source_dir, workspace)
+    rel_store_dir = os.path.relpath(store_dir, workspace)
+    rel_browse_root = os.path.relpath(browse_root, workspace)
 
-    _run_browse_scan(db_path, store_dir, browse_root, [rel_source_dir])
+    _run_browse_scan(db_path, rel_store_dir, rel_browse_root, [rel_source_dir])
 
     file_hash = calculate_hash(file_path)
     short_hash = file_hash[:7]

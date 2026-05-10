@@ -61,7 +61,8 @@ the file's content hash (e.g., `_[hash]`) to the filename before the extension.
 
 3. **Plan browse actions**
 - Add action dataclasses for symlink creation/update and symlink removal.
-- Compute browse-relative paths from each scanned source root (ensuring source roots are first resolved/canonicalized to absolute paths before storing or comparing them to avoid `ValueError` during path resolution).
+- Ensure that `store_dir`, `browse_root`, all `source_roots`, and observation file paths are systematically resolved to absolute paths before planning or executing any actions. This guarantees that relative symlink targets remain accurate regardless of the current working directory.
+- Compute browse-relative paths from each scanned source root (using the fully resolved absolute paths to avoid `ValueError` during path resolution).
 - Detect existing/stale browse entries so repeated scans stay idempotent.
 
 4. **Execute browse actions**

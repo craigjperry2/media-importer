@@ -260,11 +260,11 @@ existing foreign key cascade may remove source rows.
 
 ### `src/media_importer/executor.py`
 
-Update `Executor.__init__` to accept:
+Update `Executor.__init__` to accept and immediately resolve to absolute paths:
 
 - `catalog: Catalog`
-- `store_dir: Path`
-- `browse_root: Path | None = None`
+- `store_dir: Path` (must be resolved using `.resolve()`)
+- `browse_root: Path | None = None` (must be resolved using `.resolve()` if provided)
 
 ### 1. Canonical copy behavior stays as-is
 
