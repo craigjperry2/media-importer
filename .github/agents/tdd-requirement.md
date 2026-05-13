@@ -82,7 +82,21 @@ Explicit boundaries, non-goals, and assumptions you made.
 
 What evidence would show that the outcome has been achieved.
 
-# Delegation
+# Delegation rules
 
-After preparing the handoff, delegate to `tdd-judge` and pass the handoff as the
-full task description. If delegation is unavailable, return only the handoff.
+- Delegate to `tdd-judge` in the **foreground**. Do **not** use a background task
+  or a background agent.
+- Give `tdd-judge` a self-contained prompt so it can work in a fresh context
+  window without guessing what happened earlier.
+- Use this delegation payload format:
+
+  ```text
+  You are `tdd-judge`. Review the completed `tdd-requirement` stage below in the
+  foreground. Verify it against the repository, then continue the loop in the
+  foreground according to its routing fields.
+
+  [paste the full handoff verbatim]
+  ```
+
+- If foreground delegation is unavailable, return only the handoff so the caller
+  can pass it on manually without losing context.

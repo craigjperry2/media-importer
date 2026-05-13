@@ -39,6 +39,7 @@ Execute these from the project root after entering the dev environment (`direnv 
 * `tdd-green`: makes those exact tests pass without changing them, then sends the result to the judge.
 * `tdd-refactor`: refactors either tests or implementation in one pass, never both, then sends the result to the judge.
 * The workflow is `requirement -> judge -> red -> judge -> green -> judge -> refactor -> judge`, then either stops or loops back to `requirement`.
+* Agent-to-agent handoffs must stay in the foreground and use self-contained prompts so the next agent can continue in a fresh context without losing routing or verification details.
 * These agents are intentionally language-agnostic: they must infer the active language, tooling, and test commands from the repository rather than assuming a stack.
 
 ## 💻 Code Style: Pure vs Effectful Boundary

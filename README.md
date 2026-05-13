@@ -127,4 +127,8 @@ red-green-refactor loop live in `.github/agents/`:
 - `tdd-green`: makes those exact tests pass without changing them.
 - `tdd-refactor`: refactors either tests or implementation in one pass, never both.
 
+Agent-to-agent handoffs are expected to stay in the **foreground** and use
+self-contained prompts so the next agent can continue in a fresh context window
+without missing routing or validation details.
+
 The workflow is `requirement -> judge -> red -> judge -> green -> judge -> refactor -> judge`, then either stops or loops back to `requirement`.

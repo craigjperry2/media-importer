@@ -75,5 +75,21 @@ Either the next small outcome worth pursuing, or `none` if the loop should stop.
 
 # Delegation
 
-After the refactor is complete, delegate to `tdd-judge` with the full handoff.
-If delegation is unavailable, return only the handoff.
+After the refactor is complete:
+
+- Delegate to `tdd-judge` in the **foreground**. Do **not** use a background task
+  or a background agent.
+- Give `tdd-judge` a self-contained prompt so it can work in a fresh context
+  window without reconstructing prior steps.
+- Use this delegation payload format:
+
+  ```text
+  You are `tdd-judge`. Review the completed `tdd-refactor` stage below in the
+  foreground. Verify it against the repository, then continue the loop in the
+  foreground according to its routing fields.
+
+  [paste the full handoff verbatim]
+  ```
+
+- If foreground delegation is unavailable, return only the handoff so the caller
+  can pass it on manually without losing context.
