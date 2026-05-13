@@ -115,3 +115,16 @@ pytest
 ```
 
 (`pytest.ini_options` in `pyproject.toml` sets `testpaths = ["tests"]` so no path argument is needed.)
+
+## Copilot TDD Agents
+
+Repository-scoped custom Copilot agents for a language-agnostic
+red-green-refactor loop live in `.github/agents/`:
+
+- `tdd-judge`: verifies each completed stage in a fresh context, then either forwards it or rejects it with rework instructions.
+- `tdd-requirement`: chooses the next observable outcome and gathers research.
+- `tdd-red`: writes a small failing test slice for that outcome.
+- `tdd-green`: makes those exact tests pass without changing them.
+- `tdd-refactor`: refactors either tests or implementation in one pass, never both.
+
+The workflow is `requirement -> judge -> red -> judge -> green -> judge -> refactor -> judge`, then either stops or loops back to `requirement`.

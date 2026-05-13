@@ -31,6 +31,16 @@ Execute these from the project root after entering the dev environment (`direnv 
 4. If mutating state, define pure planning logic in `planner.py` and the execution step in `executor.py`.
 5. Add corresponding tests in the `tests/` directory.
 
+## 🤖 Specialized TDD Agents
+* Custom Copilot agents for the red-green-refactor loop live in `.github/agents/`.
+* `tdd-judge`: verifies each completed stage in a fresh context window, then either forwards it or rejects it with concrete rework instructions.
+* `tdd-requirement`: chooses the next observable outcome, gathers research, and prepares a handoff for judge review.
+* `tdd-red`: writes a small failing test slice that captures the outcome, then sends it to the judge.
+* `tdd-green`: makes those exact tests pass without changing them, then sends the result to the judge.
+* `tdd-refactor`: refactors either tests or implementation in one pass, never both, then sends the result to the judge.
+* The workflow is `requirement -> judge -> red -> judge -> green -> judge -> refactor -> judge`, then either stops or loops back to `requirement`.
+* These agents are intentionally language-agnostic: they must infer the active language, tooling, and test commands from the repository rather than assuming a stack.
+
 ## 💻 Code Style: Pure vs Effectful Boundary
 ```python
 # planner.py (Pure) - yields descriptions of work
