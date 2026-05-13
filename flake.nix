@@ -17,11 +17,12 @@
         in {
           default = pkgs.mkShell {
             packages = [
-              pkgs.python313
+              pkgs.bash
               pkgs.prek
+              pkgs.python313
               pkgs.ruff
-              pkgs.uv
               pkgs.sqlite
+              pkgs.uv
             ];
             shellHook = ''
               export UV_PYTHON_PREFERENCE=only-system
