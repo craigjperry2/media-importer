@@ -71,33 +71,74 @@ Defer until needed:
 
 ## Slice 0: Agent And Rust Workspace Preparation
 
-Before implementing import behavior, prepare the repo for Rust work.
+Before implementing import behavior, prepare the repo for clean-slate Rust work.
+The active Python implementation should be removed from this branch rather than
+kept as deprecated code. The Python implementation is not an oracle for Rust
+behavior. Keep `docs/old_python/` only as historical archived context.
 
 Scope:
 
+- Add the Cargo workspace and `crates/media-importer` scaffold:
+  - root `Cargo.toml` workspace
+  - package `crates/media-importer`
+  - binary `media-importer`
+  - library crate `media_importer`
+  - Rust 2024 edition
+- Add a minimal binary smoke test proving the scaffolded binary runs.
+- Replace Python pre-commit hooks before removing Python tooling:
+  - remove `ruff`, `mypy`, and `pytest` hooks
+  - add `cargo fmt --all --check`
+  - add `cargo clippy --workspace --all-targets -- -D warnings`
+  - add `cargo test --workspace`
 - Update `flake.nix` using Nixpkgs default Rust tooling:
+  - keep `bash`
+  - keep `prek`
+  - keep `sqlite`
   - `cargo`
   - `rustc`
   - `rustfmt`
   - `clippy`
   - `rust-analyzer`
-  - keep `sqlite`
-  - keep existing Python tooling for now
-- Add the Cargo workspace and `crates/media-importer` scaffold.
-- Add a binary smoke test.
-- Update `.pre-commit-config.yaml`/`prek` with:
-  - `cargo fmt --all --check`
-  - `cargo clippy --workspace --all-targets -- -D warnings`
-  - `cargo test --workspace`
-- Update `AGENTS.md` lightly so agents know these Rust rewrite docs are
-  authoritative for new Rust work.
-- Update the top-level `README.md` with a status note:
-  - Rust rewrite is in progress.
-  - Python implementation remains in the repo but is deprecated.
-  - New behavior should be based on `docs/from-scratch-in-rust/SPEC.md` and
-    this implementation guide.
-- Do not remove Python code or Python hooks yet.
+  - remove `python313`, `uv`, and `ruff`
+  - remove virtualenv setup from `shellHook`
+  - keep `prek install` after hooks are converted to Rust commands
+- Remove active Python implementation artifacts:
+  - `src/media_importer/`
+  - `tests/`
+  - `pyproject.toml`
+  - `uv.lock`
+- Update `AGENTS.md` so agents treat the Rust rewrite docs as authoritative,
+  use Cargo commands, and follow the Rust module boundary guidance instead of
+  the old Python planner/executor split.
+- Update the top-level `README.md` so it describes:
+  - Rust rewrite status
+  - Nix setup
+  - Cargo checks
+  - the planned milestone 1 `import` command
+  - `docs/old_python/` as historical archive material only
+- Update `.gitignore` from Python artifacts to Rust/local artifacts such as
+  `target/`, `.direnv/`, and editor/cache leftovers as needed.
+- Update `.vscode/settings.json` to remove Python test settings and use
+  Rust/Cargo-friendly settings where useful.
 - Do not add CI yet.
+
+Ordering:
+
+1. Add the Rust workspace scaffold and Rust dependencies.
+2. Replace pre-commit hooks with Rust checks.
+3. Update `flake.nix` to remove Python tooling and shell virtualenv setup.
+4. Delete Python package, tests, and Python lock/config files.
+5. Update `AGENTS.md`, `README.md`, `.gitignore`, and editor settings.
+6. Run the Rust checks from the final environment.
+
+Validation:
+
+- `nix develop` enters without trying to run `uv`, activate `.venv`, or call
+  Python tools.
+- `prek run --all-files` executes only Rust-oriented hooks.
+- `cargo fmt --all --check` passes.
+- `cargo clippy --workspace --all-targets -- -D warnings` passes.
+- `cargo test --workspace` passes, including the binary smoke test.
 
 Keep this slice reviewable and conventional-commit friendly. Do not assume
 permission to commit.
