@@ -1,7 +1,7 @@
-.venv/
-__pycache__/
-*.pyc
-*.egg-info/
-dist/
-
 .direnv/
+target/
+
+.DS_Store
+.vscode/*.log
+*.swp
+*.swo

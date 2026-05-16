@@ -1,134 +1,63 @@
-# Robust Media Consolidator & Cataloger
+# Media Importer
 
-A production-grade command-line tool written in Python to incrementally consolidate media from multiple input directories into a centralized, deduplicated "store". It uses a persistent SQLite database as a hashing cache and catalog.
+`media-importer` is being rewritten from scratch in Rust. The Rust rewrite docs
+in `docs/from-scratch-in-rust/` are authoritative for current implementation
+work; the previous Python codebase has been archived under `docs/old_python/`
+for historical context only.
 
-## Architecture
-
-The logic is strictly divided into modules:
-* `cli.py`: Argparse entrypoint.
-* `models.py`: Dataclasses modeling domain objects.
-* `hashing.py`: Cryptographic content hashing.
-* `scanner.py`: Filesystem traversal ignoring symlinks.
-* `catalog.py`: SQLite connection management and deterministic schema.
-* `planner.py`: Purely functional state comparison. Yields execution plans.
-* `executor.py`: Effectful executor that processes action plans (atomic copying, DB transactions).
-
-## Requirements & Environment
-
-This tool uses a Nix Flake for fully reproducible dependencies and `uv` for Python virtual environment management.
-
-### Prerequisites
-
-- [Nix](https://nixos.org/download/) with flakes enabled
-- [direnv](https://direnv.net/) (optional, but recommended)
-
-### Setup
-
-**Option A — direnv (recommended):** The repo includes a `.envrc` that activates the flake automatically. After installing direnv:
+The current branch contains the initial Cargo workspace scaffold. Milestone 1
+will add a single end-to-end `import` command that imports a source directory
+into a content-addressed store and records catalog state in SQLite:
 
 ```sh
-direnv allow
+media-importer import \
+  --store /path/to/store \
+  --source /path/to/source \
+  [--db /path/to/catalog.sqlite] \
+  [--dry-run] \
+  [--chunk-size <bytes>]
 ```
 
-This drops you into a shell with Python 3.13, `uv`, Nix-provided native CLI tools such as `prek` and `ruff`, and an activated `.venv` with all dependencies installed.
+## Setup
 
-**Option B — manual:**
+Use the Nix development shell from the repository root:
 
 ```sh
 nix develop
 ```
 
-In both cases the `shellHook` runs `uv sync --dev` to create `.venv/` and install dependencies, then activates the virtualenv. The shell then prefers Nix-provided native CLI tools such as `prek` and `ruff`, which keeps the setup working on both nix-darwin and NixOS. Subsequent entries are fast because `uv` is incremental.
-
-**Option C — without nix (not recommended):** You are responsible for providing a suitable uv and python version (NB: uv can provide the python version). You can then manually create the venv, sync the dependencies, and install the pre-commit hook:
-
-```sh
-uv sync --dev
-source .venv/bin/activate
-prek install
-```
-
-### Running the app
-
-With the venv active (either via direnv or after `nix develop`):
+With `direnv`, allow the repository once and let it enter the same flake shell
+automatically:
 
 ```sh
-media-importer --help
+direnv allow
 ```
 
-## Usage
+The shell provides Cargo, rustc, rustfmt, clippy, rust-analyzer, SQLite, bash,
+and `prek`. Entering the shell installs the pre-commit hooks.
 
-### Scanning and Consolidating
+## Checks
+
+Run the same checks configured in pre-commit:
 
 ```sh
-media-importer scan \
-  --store /path/to/store \
-  --db /path/to/catalog.db \
-  --source /path/to/source1 \
-  --source /path/to/source2
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-During `scan`, the CLI reports count-based progress as it walks sources, plans work, and processes file copies so long-running runs stay visible.
-
-To maintain a human-browsable symlink overlay alongside the hash-based store,
-pass `--browse-root`. The browse tree mirrors each source-relative path, but
-the file name is suffixed with the first seven characters of the content hash to
-keep paths stable and collision-free:
+Or run all hooks:
 
 ```sh
-media-importer scan \
-  --store /path/to/store \
-  --browse-root /path/to/browse \
-  --db /path/to/catalog.db \
-  --source /path/to/source
+prek run --all-files
 ```
 
-The real files remain in the canonical store. The browse root contains only
-symlinks, and rescans remove stale links for files that disappeared from the
-scanned source roots.
+## Repository Layout
 
-Use `--dry-run` to observe planned changes without writing to disk or database:
-```sh
-media-importer scan --store store --db catalog.db --source src_dir --dry-run
-```
+- `Cargo.toml`: root Cargo workspace.
+- `crates/media-importer/`: Rust application package, binary, and library.
+- `docs/from-scratch-in-rust/`: active product, architecture, testing, and
+  implementation guidance for the rewrite.
+- `docs/old_python/`: archived Python-era notes and feature material. Do not
+  use this archive as a behavior oracle for the Rust implementation.
 
-Non-dry-run scans process files incrementally in bounded batches so newly hashed files are copied while they are still likely to be resident in the page cache. `--dry-run` still computes the full action list up front.
-
-### Verifying Store State
-
-To find missing or unindexed files in the store:
-```sh
-media-importer verify-store --store /path/to/store --db /path/to/catalog.db
-```
-
-### Querying the Catalog
-
-Search the database:
-```sh
-media-importer query --db /path/to/catalog.db --ext .jpg --name "vacation"
-```
-
-## Running Tests
-
-```sh
-pytest
-```
-
-(`pytest.ini_options` in `pyproject.toml` sets `testpaths = ["tests"]` so no path argument is needed.)
-
-## Copilot TDD Agents
-
-Repository-scoped custom Copilot agents for a language-agnostic
-red-green-refactor loop live in `.github/agents/`:
-
-- `tdd-judge`: verifies each completed stage in a fresh context, then either forwards it or rejects it with rework instructions.
-- `tdd-requirement`: chooses the next observable outcome and gathers research.
-- `tdd-red`: writes a small failing test slice for that outcome.
-- `tdd-green`: makes those exact tests pass without changing them.
-- `tdd-refactor`: refactors either tests or implementation in one pass, never both.
-
-Agent-to-agent handoffs are expected to stay in the **foreground** and use
-self-contained prompts so the next agent can continue in a fresh context window
-without missing routing or validation details.
-
-The workflow is `requirement -> judge -> red -> judge -> green -> judge -> refactor -> judge`, then either stops or loops back to `requirement`.

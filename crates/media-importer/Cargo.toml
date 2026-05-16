@@ -1,0 +1,27 @@
+[package]
+name = "media-importer"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "media-importer"
+path = "src/main.rs"
+
+[lib]
+name = "media_importer"
+path = "src/lib.rs"
+
+[dependencies]
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+color-eyre = "0.6"
+rusqlite = { version = "0.39", features = ["bundled"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4"] }
+walkdir = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+assert_fs = "1"
+predicates = "3"

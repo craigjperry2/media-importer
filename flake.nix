@@ -18,19 +18,15 @@
           default = pkgs.mkShell {
             packages = [
               pkgs.bash
+              pkgs.cargo
+              pkgs.clippy
               pkgs.prek
-              pkgs.python313
-              pkgs.ruff
+              pkgs.rust-analyzer
+              pkgs.rustc
+              pkgs.rustfmt
               pkgs.sqlite
-              pkgs.uv
             ];
             shellHook = ''
-              export UV_PYTHON_PREFERENCE=only-system
-              uv sync --dev
-              source .venv/bin/activate
-              # Prefer Nix-provided native CLI tools because wheel-installed
-              # binaries are not runnable on NixOS.
-              export PATH="${pkgs.lib.makeBinPath [ pkgs.prek pkgs.ruff ]}:$PATH"
               prek install
             '';
           };
