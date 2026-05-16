@@ -40,6 +40,8 @@ Execute these from the project root after entering the dev environment
 - Do not use ORMs.
 - Do not expose placeholder commands before their milestone.
 - Maintain type safety and do not suppress linting broadly.
+- Delete unused generated code instead of hiding it with `#[allow(dead_code)]`.
+  Use local lint allowances only for deliberate, documented exceptions.
 
 ## Project Structure
 
@@ -58,4 +60,3 @@ Use Conventional Commits for commit messages when asked to commit:
 - `test: behavior covered by tests`
 
 Do not assume permission to commit unless explicitly asked.
-

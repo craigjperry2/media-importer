@@ -7,6 +7,9 @@ These preferences apply to SQLite usage in this project.
 - Use raw SQL through `rusqlite`.
 - Do not use ORMs.
 - Keep schema SQL deterministic, visible, and reviewable.
+- Keep application SQL in colocated `.sql` files and load it with
+  `include_str!`. Inline SQL in Rust should be limited to trivial one-liners
+  where a separate file would make the code harder to read.
 - Keep SQLite connections hidden behind a catalog module. Callers should not
   choreograph transactions or manipulate raw connections.
 
@@ -59,6 +62,7 @@ These preferences apply to SQLite usage in this project.
 - If it exists, open read-only if possible.
 - Do not create database files, WAL files, SHM files, or parent directories.
 - Do not run migrations in dry-run.
-- If read-only access would mutate sidecar files in practice, copy to a temp or
-  in-memory database before inspection.
-
+- If dry-run needs an isolated catalog snapshot, use SQLite's backup API to copy
+  into a temp or in-memory database before inspection. Do not copy
+  `catalog.sqlite`, `-wal`, and `-shm` files independently; that is not a safe
+  snapshot without filesystem-level atomicity.

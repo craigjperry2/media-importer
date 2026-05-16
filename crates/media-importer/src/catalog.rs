@@ -4,11 +4,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, bail, eyre};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 
 use crate::paths::{BlobHash, SourceRelativePath};
 
 const CURRENT_SCHEMA_VERSION: i64 = 1;
+const INSERT_BLOB_SQL: &str = include_str!("catalog/sql/insert_blob.sql");
+const READ_USER_VERSION_SQL: &str = include_str!("catalog/sql/read_user_version.sql");
+const SCHEMA_V1_SQL: &str = include_str!("catalog/sql/schema_v1.sql");
+const SELECT_BLOB_SIZE_SQL: &str = include_str!("catalog/sql/select_blob_size.sql");
+const SELECT_SOURCE_FILE_ID_SQL: &str = include_str!("catalog/sql/select_source_file_id.sql");
+const UPSERT_SOURCE_FILE_SQL: &str = include_str!("catalog/sql/upsert_source_file.sql");
+const WRITABLE_PRAGMAS_SQL: &str = include_str!("catalog/sql/writable_pragmas.sql");
 
 pub trait Clock {
     fn now_ms(&self) -> i64;
@@ -75,11 +82,7 @@ impl Catalog {
         let mut connection =
             Connection::open(path).wrap_err_with(|| format!("open catalog database {:?}", path))?;
         connection
-            .execute_batch(
-                "PRAGMA foreign_keys = ON;
-                 PRAGMA journal_mode = WAL;
-                 PRAGMA synchronous = NORMAL;",
-            )
+            .execute_batch(WRITABLE_PRAGMAS_SQL)
             .wrap_err("enable catalog PRAGMAs")?;
         migrate(&mut connection)?;
         Ok(Self { connection })
@@ -97,8 +100,7 @@ impl Catalog {
 
         let inserted_blobs = tx
             .execute(
-                "INSERT OR IGNORE INTO blobs (hash, size_bytes, created_at_ms, deleted_at_ms)
-                 VALUES (?1, ?2, ?3, NULL)",
+                INSERT_BLOB_SQL,
                 params![
                     blob.hash.as_str(),
                     sqlite_u64(blob.size_bytes, "blob size")?,
@@ -110,11 +112,9 @@ impl Catalog {
             BlobRecordOutcome::Inserted
         } else {
             let existing_size: i64 = tx
-                .query_row(
-                    "SELECT size_bytes FROM blobs WHERE hash = ?1",
-                    params![blob.hash.as_str()],
-                    |row| row.get(0),
-                )
+                .query_row(SELECT_BLOB_SIZE_SQL, params![blob.hash.as_str()], |row| {
+                    row.get(0)
+                })
                 .wrap_err("read existing blob record")?;
             if existing_size != sqlite_u64(blob.size_bytes, "blob size")? {
                 bail!(
@@ -129,9 +129,7 @@ impl Catalog {
 
         let existing_source: Option<i64> = tx
             .query_row(
-                "SELECT id
-                 FROM source_files
-                 WHERE source_root = ?1 AND relative_path = ?2",
+                SELECT_SOURCE_FILE_ID_SQL,
                 params![
                     observation.source_root.as_str(),
                     observation.relative_path.as_str()
@@ -147,23 +145,7 @@ impl Catalog {
         };
 
         tx.execute(
-            "INSERT INTO source_files (
-                source_root,
-                relative_path,
-                blob_hash,
-                size_bytes,
-                modified_at_ms,
-                first_seen_at_ms,
-                last_seen_at_ms,
-                seen_count
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 1)
-             ON CONFLICT(source_root, relative_path) DO UPDATE SET
-                blob_hash = excluded.blob_hash,
-                size_bytes = excluded.size_bytes,
-                modified_at_ms = excluded.modified_at_ms,
-                last_seen_at_ms = excluded.last_seen_at_ms,
-                seen_count = source_files.seen_count + 1",
+            UPSERT_SOURCE_FILE_SQL,
             params![
                 observation.source_root.as_str(),
                 observation.relative_path.as_str(),
@@ -191,11 +173,11 @@ impl ReadOnlyCatalog {
         if !path.exists() {
             return Ok(None);
         }
-        let (open_path, temp_dir) = copy_catalog_for_read_only_access(path)?;
+        let (open_path, temp_dir) = backup_catalog_for_read_only_access(path)?;
         let connection = Connection::open_with_flags(&open_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .wrap_err_with(|| format!("open read-only catalog database {:?}", path))?;
         let version: i64 = connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
             .wrap_err("read catalog schema version")?;
         if version > CURRENT_SCHEMA_VERSION {
             bail!(
@@ -223,9 +205,7 @@ impl ReadOnlyCatalog {
         let existing: Option<i64> = self
             .connection
             .query_row(
-                "SELECT id
-                 FROM source_files
-                 WHERE source_root = ?1 AND relative_path = ?2",
+                SELECT_SOURCE_FILE_ID_SQL,
                 params![source_root, relative_path.as_str()],
                 |row| row.get(0),
             )
@@ -249,7 +229,7 @@ impl Drop for ReadOnlyCatalog {
 
 fn migrate(connection: &mut Connection) -> Result<()> {
     let version: i64 = connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
         .wrap_err("read catalog schema version")?;
 
     if version > CURRENT_SCHEMA_VERSION {
@@ -266,41 +246,13 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     let tx = connection
         .transaction()
         .wrap_err("begin catalog schema migration")?;
-    tx.execute_batch(
-        "CREATE TABLE blobs (
-            hash TEXT PRIMARY KEY CHECK(length(hash) = 64),
-            size_bytes INTEGER NOT NULL,
-            created_at_ms INTEGER NOT NULL,
-            deleted_at_ms INTEGER
-        );
-
-        CREATE TABLE source_files (
-            id INTEGER PRIMARY KEY,
-            source_root TEXT NOT NULL CHECK(length(source_root) > 0),
-            relative_path TEXT NOT NULL CHECK(
-                length(relative_path) > 0
-                AND substr(relative_path, 1, 1) != '/'
-            ),
-            blob_hash TEXT NOT NULL REFERENCES blobs(hash),
-            size_bytes INTEGER NOT NULL,
-            modified_at_ms INTEGER,
-            first_seen_at_ms INTEGER NOT NULL,
-            last_seen_at_ms INTEGER NOT NULL,
-            seen_count INTEGER NOT NULL DEFAULT 1,
-            UNIQUE(source_root, relative_path)
-        );
-
-        CREATE INDEX idx_source_files_blob_hash
-        ON source_files(blob_hash);
-
-        PRAGMA user_version = 1;",
-    )
-    .wrap_err("create catalog schema version 1")?;
+    tx.execute_batch(SCHEMA_V1_SQL)
+        .wrap_err("create catalog schema version 1")?;
     tx.commit().wrap_err("commit catalog schema migration")?;
     Ok(())
 }
 
-fn copy_catalog_for_read_only_access(path: &Path) -> Result<(PathBuf, PathBuf)> {
+fn backup_catalog_for_read_only_access(path: &Path) -> Result<(PathBuf, PathBuf)> {
     let temp_dir =
         std::env::temp_dir().join(format!("media-importer-dry-run-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&temp_dir)
@@ -310,31 +262,24 @@ fn copy_catalog_for_read_only_access(path: &Path) -> Result<(PathBuf, PathBuf)> 
         .file_name()
         .ok_or_else(|| eyre!("catalog path must name a file: {:?}", path))?;
     let copied_db = temp_dir.join(file_name);
-    fs::copy(path, &copied_db).wrap_err_with(|| {
-        format!(
-            "copy catalog database {:?} to dry-run temp path {:?}",
-            path, copied_db
-        )
-    })?;
 
-    for suffix in ["-wal", "-shm"] {
-        let sidecar = sidecar_path(path, suffix);
-        if sidecar.exists() {
-            let copied_sidecar = sidecar_path(&copied_db, suffix);
-            fs::copy(&sidecar, &copied_sidecar).wrap_err_with(|| {
-                format!(
-                    "copy catalog sidecar {:?} to dry-run temp path {:?}",
-                    sidecar, copied_sidecar
-                )
-            })?;
+    let source = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        Ok(source) => source,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&temp_dir);
+            return Err(error)
+                .wrap_err_with(|| format!("open source catalog database for backup {:?}", path));
         }
+    };
+    if let Err(error) = source.backup(MAIN_DB, &copied_db, None) {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(error).wrap_err_with(|| {
+            format!(
+                "backup catalog database {:?} to dry-run temp path {:?}",
+                path, copied_db
+            )
+        });
     }
 
     Ok((copied_db, temp_dir))
-}
-
-fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = path.as_os_str().to_owned();
-    value.push(suffix);
-    PathBuf::from(value)
 }
