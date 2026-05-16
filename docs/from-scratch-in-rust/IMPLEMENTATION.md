@@ -4,6 +4,8 @@ This guide records implementation decisions for the Rust rewrite of
 `media-importer`. The source of product intent is `SPEC.md`; this file captures
 the concrete choices a coding agent should follow while implementing it.
 
+This IMPLEMENTATION.md governs milestone 1; SPEC.md is aspirational context.
+
 The existing Python implementation is deprecated historical context. Do not port
 it file-by-file and do not use it as a behavior oracle.
 
@@ -292,9 +294,8 @@ pub struct SourceFileCandidate {
 }
 ```
 
-`modified_at_ms` is advisory metadata only. If mtime is unavailable or before
-Unix epoch, store `None` and trace/debug it. Do not depend on mtime for
-correctness in milestone 1.
+`modified_at_ms` is advisory metadata only. If mtime is unavailable, store `None`
+and trace/debug it. Do not depend on mtime for correctness in milestone 1.
 
 ## Store And Hashing
 
@@ -672,6 +673,7 @@ Useful checks:
 - Report cataloged blobs whose CAS file is missing.
 - Walk the CAS without following symlinks.
 - Report regular CAS files that are not indexed by the catalog.
+- Loudly flag missing CAS files present in the catalog.
 - Report CAS files whose size differs from catalog metadata.
 - Defer any repair mode until its locking, dry-run, and failure semantics are
   specified.

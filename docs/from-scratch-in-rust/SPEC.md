@@ -18,14 +18,14 @@ Build a high-velocity, deduplicating media ingestion and management CLI tool in 
 ### Supported Platforms
 
 - **Linux and macOS Only:** Windows is not a platform target. Do not design or
-  test around Windows symlink, permission, or path-prefix semantics unless
+  test around Windows symlink, permission, or path-prefix semantics since
   Windows support is explicitly now de-prioritized.
 
 ### The I/O Pipeline (The Shell)
 
 - **Mount-Point Workers:** Concurrency is constrained by physical block device. 1 worker for HDDs; configurable N for SSDs.
 - **Streaming Buffer:** Use a configurable chunk-based read/hash/write loop.
-- **Staging Area:** All writes go to a `.tmp` file in a ZFS staging directory. Only on EOF and successful DB commit is the file atomically `mv`'d to the CAS.
+- **Staging Area:** All writes go to a `.tmp` file in a ZFS staging directory. Never commit a DB record for a blob that only exists in staging; stage -> install to CAS -> commit DB.
 - **Purge on Boot:** The application must clear the staging directory upon startup to recover from crashes.
 
 ### The Database (The Persistence)
