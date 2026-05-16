@@ -15,6 +15,12 @@ Build a high-velocity, deduplicating media ingestion and management CLI tool in 
 
 ## 3. Architectural Constraints
 
+### Supported Platforms
+
+- **Linux and macOS Only:** Windows is not a platform target. Do not design or
+  test around Windows symlink, permission, or path-prefix semantics unless
+  Windows support is explicitly now de-prioritized.
+
 ### The I/O Pipeline (The Shell)
 
 - **Mount-Point Workers:** Concurrency is constrained by physical block device. 1 worker for HDDs; configurable N for SSDs.

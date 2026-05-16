@@ -38,6 +38,19 @@ These preferences describe the shape expected from Rust implementation work.
 - Ingest modules orchestrate scanner, store, catalog, and reporting through
   behavior-level interfaces.
 
+## Progress And Telemetry
+
+- Scanner, store, catalog, executor, and ingest internals must not write ad hoc
+  progress text to stdout.
+- Long-running behavior-level APIs may accept a narrow reporter or telemetry
+  sink and emit structured domain events such as files discovered, bytes hashed,
+  bytes written, batches committed, and files skipped.
+- Keep reporting optional and coarse-grained. Pure helpers and low-level utility
+  functions should not grow reporter parameters just to expose implementation
+  mechanics.
+- CLI code owns rendering structured events as human output, TTY dashboards, or
+  append-only machine-readable logs.
+
 ## Types As Guardrails
 
 - Use small newtypes where they prevent category mistakes:
@@ -62,4 +75,3 @@ These preferences describe the shape expected from Rust implementation work.
   or matches a proven local pattern.
 - Avoid speculative generic code. Prefer concrete types and operations until the
   second use case is real.
-

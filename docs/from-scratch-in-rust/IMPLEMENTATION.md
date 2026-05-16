@@ -594,6 +594,17 @@ media-importer build-tree --store <STORE_ROOT> --output <TREE_ROOT>
 Materialize presentation symlinks from catalog state. Import must not build the
 tree automatically.
 
+Safety semantics:
+
+- Symlink targets are relative from the link parent to the canonical blob.
+- Existing correct symlinks are left unchanged.
+- Existing incorrect symlinks may be replaced.
+- Non-symlink entries at desired output paths are errors, never overwritten.
+- Reject absolute, empty, or parent-traversing materialized relative paths before
+  creating directories or links.
+- Cleanup removes only symlinks and prunes only empty directories below the
+  output root.
+
 ### `gc`
 
 Future command:
@@ -615,10 +626,31 @@ media-importer audit --store <STORE_ROOT>
 Check consistency between SQLite and the CAS filesystem. Mutate nothing by
 default.
 
+Useful checks:
+
+- Report cataloged blobs whose CAS file is missing.
+- Walk the CAS without following symlinks.
+- Report regular CAS files that are not indexed by the catalog.
+- Report CAS files whose size differs from catalog metadata.
+- Defer any repair mode until its locking, dry-run, and failure semantics are
+  specified.
+
 ### Relationships And Media Metadata
 
 Defer relationship tables and media metadata tables until the first feature
 needs them. Do not add unused schema in milestone 1.
+
+### Catalog Run Locking
+
+Future mutating commands should use a catalog-backed `run_locks` table, or an
+equivalent SQLite-backed lock, to reject accidental concurrent live runs against
+the same catalog.
+
+The lock should be acquired atomically before mutating work begins, record an
+owner token plus acquired/heartbeat timestamps, refresh during long runs, and be
+released on normal completion. Dry-run and read-only commands do not acquire the
+write lock. Stale lock breaking, waiting, and force-unlock behavior must be
+explicitly specified before implementation.
 
 ### Concurrency And Writer Thread
 
