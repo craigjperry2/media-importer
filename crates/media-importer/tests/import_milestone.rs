@@ -16,7 +16,8 @@ fn help_exposes_import_command() {
     cmd.arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("import"));
+        .stdout(predicate::str::contains("import"))
+        .stdout(predicate::str::contains("build-tree"));
 }
 
 #[test]
@@ -219,6 +220,215 @@ fn newer_schema_version_fails_clearly() {
         .stderr(predicate::str::contains("newer than supported version 1"));
 }
 
+#[cfg(unix)]
+#[test]
+fn build_tree_creates_relative_symlinks_and_rerun_is_unchanged() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source.child("Movies").create_dir_all().expect("movies dir");
+    source
+        .child("Movies/clip.mov")
+        .write_str("clip")
+        .expect("clip");
+    source.child(".env").write_str("env").expect("env");
+    source.child("README").write_str("readme").expect("readme");
+    let store = temp.child("store");
+    let browse = temp.child("browse");
+
+    run_import(source.path(), store.path()).success();
+    run_build_tree(store.path(), browse.path(), &[])
+        .success()
+        .stdout(predicate::str::contains("Build tree complete"))
+        .stdout(predicate::str::contains("Desired links: 3"))
+        .stdout(predicate::str::contains("Links created: 3"))
+        .stdout(predicate::str::contains("Directories created: 2"));
+
+    assert_materialized_link(
+        browse.path(),
+        store.path(),
+        "Movies/clip.mov",
+        "Movies/clip_",
+        ".mov",
+        "clip",
+    );
+    assert_materialized_link(browse.path(), store.path(), ".env", ".env_", "", "env");
+    assert_materialized_link(
+        browse.path(),
+        store.path(),
+        "README",
+        "README_",
+        "",
+        "readme",
+    );
+
+    run_build_tree(store.path(), browse.path(), &[])
+        .success()
+        .stdout(predicate::str::contains("Links created: 0"))
+        .stdout(predicate::str::contains("Links unchanged: 3"));
+}
+
+#[cfg(unix)]
+#[test]
+fn build_tree_dry_run_reports_without_mutating() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source.child("a.txt").write_str("alpha").expect("alpha");
+    let store = temp.child("store");
+    let browse = temp.child("browse");
+
+    run_import(source.path(), store.path()).success();
+    run_build_tree(store.path(), browse.path(), &["--dry-run"])
+        .success()
+        .stdout(predicate::str::contains("Dry run complete"))
+        .stdout(predicate::str::contains("Links that would be created: 1"))
+        .stdout(predicate::str::contains(
+            "Directories that would be created: 1",
+        ));
+
+    assert!(!browse.path().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn build_tree_rejects_missing_catalog_and_db_inside_browse_tree() {
+    let temp = TempDir::new().expect("tempdir");
+    let store = temp.child("store");
+    store.child("blobs").create_dir_all().expect("blobs dir");
+    let browse = temp.child("browse");
+    browse.create_dir_all().expect("browse dir");
+
+    run_build_tree(store.path(), browse.path(), &[])
+        .failure()
+        .stderr(predicate::str::contains("catalog database does not exist"));
+
+    run_build_tree(
+        store.path(),
+        browse.path(),
+        &[
+            "--db",
+            browse.child("catalog.sqlite").path().to_str().unwrap(),
+        ],
+    )
+    .failure()
+    .stderr(predicate::str::contains(
+        "database path must not be inside browse tree",
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn build_tree_removes_stale_owned_symlinks_without_pruning_nonempty_dirs() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source.child("a.txt").write_str("alpha").expect("alpha");
+    let store = temp.child("store");
+    let browse = temp.child("browse");
+
+    run_import(source.path(), store.path()).success();
+    let stale_dir = browse.child("stale/sub");
+    stale_dir.create_dir_all().expect("stale dir");
+    stale_dir
+        .child("keep.txt")
+        .write_str("keep")
+        .expect("keep file");
+    let blobs = store
+        .child("blobs")
+        .path()
+        .canonicalize()
+        .expect("canonical blobs dir");
+    let stale_link = stale_dir.child("old_link");
+    symlink(blobs.join("missing-owned-blob"), stale_link.path()).expect("stale symlink");
+
+    run_build_tree(store.path(), browse.path(), &[])
+        .success()
+        .stdout(predicate::str::contains("Stale links removed: 1"))
+        .stdout(predicate::str::contains("Directories pruned: 0"));
+
+    assert!(
+        fs::symlink_metadata(stale_link.path()).is_err(),
+        "stale symlink should be removed"
+    );
+    assert!(stale_dir.child("keep.txt").path().exists());
+    assert!(stale_dir.path().is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn build_tree_rejects_cas_blob_paths_that_are_symlinks() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source.child("a.txt").write_str("alpha").expect("alpha");
+    let store = temp.child("store");
+    let browse = temp.child("browse");
+
+    run_import(source.path(), store.path()).success();
+    let blob = blob_path(store.path(), "alpha");
+    let real_blob = blob.with_extension("real");
+    fs::rename(&blob, &real_blob).expect("move blob aside");
+    symlink(&real_blob, &blob).expect("replace blob path with symlink");
+
+    run_build_tree(store.path(), browse.path(), &[])
+        .failure()
+        .stderr(predicate::str::contains("CAS blob is not a regular file"));
+    assert!(!browse.path().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn build_tree_replaces_owned_absolute_symlinks_and_preserves_user_symlinks() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source.child("a.txt").write_str("alpha").expect("alpha");
+    let store = temp.child("store");
+    let browse = temp.child("browse");
+
+    run_import(source.path(), store.path()).success();
+    run_build_tree(store.path(), browse.path(), &[]).success();
+
+    let output = materialized_path(browse.path(), "a_", ".txt", "alpha");
+    fs::remove_file(&output).expect("remove materialized link");
+    symlink(
+        blob_path(store.path(), "alpha")
+            .canonicalize()
+            .expect("canonical blob"),
+        &output,
+    )
+    .expect("absolute owned symlink");
+
+    let user_target = temp.child("user-target");
+    user_target.write_str("user").expect("user target");
+    let user_link = browse.child("user-link");
+    symlink(user_target.path(), user_link.path()).expect("user symlink");
+
+    run_build_tree(store.path(), browse.path(), &[])
+        .success()
+        .stdout(predicate::str::contains("Links replaced: 1"))
+        .stdout(predicate::str::contains("Stale links removed: 0"));
+
+    let target = fs::read_link(&output).expect("read replaced link");
+    assert!(
+        !target.is_absolute(),
+        "target should be relative: {target:?}"
+    );
+    assert_eq!(
+        output
+            .parent()
+            .expect("link parent")
+            .join(&target)
+            .canonicalize()
+            .expect("canonical symlink target"),
+        blob_path(store.path(), "alpha")
+            .canonicalize()
+            .expect("canonical blob path")
+    );
+    assert!(user_link.path().is_symlink());
+}
+
 fn run_import(source: &Path, store: &Path) -> assert_cmd::assert::Assert {
     run_import_args(source, store, &[])
 }
@@ -232,6 +442,67 @@ fn run_import_args(source: &Path, store: &Path, extra: &[&str]) -> assert_cmd::a
         .arg(source)
         .args(extra)
         .assert()
+}
+
+fn run_build_tree(store: &Path, browse: &Path, extra: &[&str]) -> assert_cmd::assert::Assert {
+    let mut cmd = Command::cargo_bin("media-importer").expect("binary exists");
+    cmd.arg("build-tree")
+        .arg("--store")
+        .arg(store)
+        .arg("--browse-tree")
+        .arg(browse)
+        .args(extra)
+        .assert()
+}
+
+#[cfg(unix)]
+fn assert_materialized_link(
+    browse: &Path,
+    store: &Path,
+    source_relative_path: &str,
+    expected_prefix: &str,
+    expected_suffix: &str,
+    contents: &str,
+) {
+    let output = materialized_path(browse, expected_prefix, expected_suffix, contents);
+    assert!(output.is_symlink(), "expected symlink at {output:?}");
+    let target = fs::read_link(&output).expect("read symlink");
+    assert!(
+        !target.is_absolute(),
+        "target should be relative: {target:?}"
+    );
+    assert_eq!(
+        output
+            .parent()
+            .expect("link parent")
+            .join(&target)
+            .canonicalize()
+            .expect("canonical symlink target"),
+        blob_path(store, contents)
+            .canonicalize()
+            .expect("canonical blob path")
+    );
+
+    let connection = Connection::open(store.join("catalog.sqlite")).expect("open db");
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM source_files WHERE relative_path = ?1",
+            params![source_relative_path],
+            |row| row.get(0),
+        )
+        .expect("source row count");
+    assert_eq!(count, 1);
+}
+
+#[cfg(unix)]
+fn materialized_path(
+    browse: &Path,
+    expected_prefix: &str,
+    expected_suffix: &str,
+    contents: &str,
+) -> PathBuf {
+    let hash = blake3::hash(contents.as_bytes()).to_hex().to_string();
+    browse.join(format!("{expected_prefix}{}{expected_suffix}", &hash[..6]))
 }
 
 fn assert_blob(store: &Path, contents: &str, read_only: bool) {

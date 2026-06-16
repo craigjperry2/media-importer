@@ -1,6 +1,7 @@
 use color_eyre::Result;
-use media_importer::cli::{Cli, CliCommand, render_import_report};
+use media_importer::cli::{Cli, CliCommand, render_build_tree_report, render_import_report};
 use media_importer::ingest::import_source;
+use media_importer::materialize::build_tree;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
@@ -14,6 +15,10 @@ fn main() -> Result<()> {
         CliCommand::Import(config) => {
             let report = import_source(config)?;
             render_import_report(&report);
+        }
+        CliCommand::BuildTree(config) => {
+            let report = build_tree(config)?;
+            render_build_tree_report(&report);
         }
     }
 

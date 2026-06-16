@@ -13,6 +13,8 @@ const INSERT_BLOB_SQL: &str = include_str!("catalog/sql/insert_blob.sql");
 const READ_USER_VERSION_SQL: &str = include_str!("catalog/sql/read_user_version.sql");
 const SCHEMA_V1_SQL: &str = include_str!("catalog/sql/schema_v1.sql");
 const SELECT_BLOB_SIZE_SQL: &str = include_str!("catalog/sql/select_blob_size.sql");
+const SELECT_LIVE_MATERIALIZATION_ENTRIES_SQL: &str =
+    include_str!("catalog/sql/select_live_materialization_entries.sql");
 const SELECT_SOURCE_FILE_ID_SQL: &str = include_str!("catalog/sql/select_source_file_id.sql");
 const UPSERT_SOURCE_FILE_SQL: &str = include_str!("catalog/sql/upsert_source_file.sql");
 const WRITABLE_PRAGMAS_SQL: &str = include_str!("catalog/sql/writable_pragmas.sql");
@@ -47,6 +49,13 @@ pub struct SourceObservation {
     pub size_bytes: u64,
     pub modified_at_ms: Option<i64>,
     pub observed_at_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveMaterializationEntry {
+    pub relative_path: SourceRelativePath,
+    pub blob_hash: BlobHash,
+    pub blob_size_bytes: u64,
 }
 
 // BlobRecord     | SourceObservation | Scenario Description
@@ -169,6 +178,38 @@ fn sqlite_u64(value: u64, label: &str) -> Result<i64> {
 }
 
 impl ReadOnlyCatalog {
+    pub fn open_for_materialization(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            bail!("catalog database does not exist: {:?}", path);
+        }
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .wrap_err_with(|| format!("open read-only catalog database {:?}", path))?;
+        let version: i64 = connection
+            .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
+            .wrap_err("read catalog schema version")?;
+        if version == 0 {
+            bail!("catalog database is uninitialized: {:?}", path);
+        }
+        if version > CURRENT_SCHEMA_VERSION {
+            bail!(
+                "catalog schema version {} is newer than supported version {}",
+                version,
+                CURRENT_SCHEMA_VERSION
+            );
+        }
+        if version != CURRENT_SCHEMA_VERSION {
+            bail!(
+                "catalog schema version {} is unsupported; expected {}",
+                version,
+                CURRENT_SCHEMA_VERSION
+            );
+        }
+        Ok(Self {
+            connection,
+            temp_dir: None,
+        })
+    }
+
     pub fn open_if_exists(path: &Path) -> Result<Option<Self>> {
         if !path.exists() {
             return Ok(None);
@@ -216,6 +257,36 @@ impl ReadOnlyCatalog {
         } else {
             SourceObservationOutcome::Inserted
         })
+    }
+
+    pub fn live_materialization_entries(&self) -> Result<Vec<LiveMaterializationEntry>> {
+        let mut statement = self
+            .connection
+            .prepare(SELECT_LIVE_MATERIALIZATION_ENTRIES_SQL)
+            .wrap_err("prepare live materialization query")?;
+        let rows = statement
+            .query_map([], |row| {
+                let relative_path: String = row.get(0)?;
+                let blob_hash: String = row.get(1)?;
+                let size_bytes: i64 = row.get(2)?;
+                Ok((relative_path, blob_hash, size_bytes))
+            })
+            .wrap_err("query live materialization entries")?;
+
+        let mut entries = Vec::new();
+        for row in rows {
+            let (relative_path, blob_hash, size_bytes) =
+                row.wrap_err("read live materialization entry")?;
+            if size_bytes < 0 {
+                bail!("catalog blob size is negative for hash {blob_hash}");
+            }
+            entries.push(LiveMaterializationEntry {
+                relative_path: SourceRelativePath::from_catalog_text(&relative_path)?,
+                blob_hash: BlobHash::new(blob_hash)?,
+                blob_size_bytes: size_bytes as u64,
+            });
+        }
+        Ok(entries)
     }
 }
 

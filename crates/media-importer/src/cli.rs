@@ -4,8 +4,12 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
 
-use crate::config::{DEFAULT_CHUNK_SIZE, ImportConfig, ImportOptions};
+use crate::config::{
+    BuildTreeConfig, BuildTreeOptions, DEFAULT_CHUNK_SIZE, DEFAULT_HASH_DIGITS, ImportConfig,
+    ImportOptions,
+};
 use crate::ingest::ImportReport;
+use crate::materialize::BuildTreeReport;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -17,6 +21,7 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Import(ImportArgs),
+    BuildTree(BuildTreeArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -33,8 +38,23 @@ struct ImportArgs {
     chunk_size: NonZeroUsize,
 }
 
+#[derive(Debug, Parser)]
+struct BuildTreeArgs {
+    #[arg(long)]
+    store: PathBuf,
+    #[arg(long)]
+    browse_tree: PathBuf,
+    #[arg(long)]
+    db: Option<PathBuf>,
+    #[arg(long)]
+    dry_run: bool,
+    #[arg(long, default_value_t = DEFAULT_HASH_DIGITS)]
+    hash_digits: NonZeroUsize,
+}
+
 pub enum CliCommand {
     Import(ImportConfig),
+    BuildTree(BuildTreeConfig),
 }
 
 impl Cli {
@@ -57,6 +77,16 @@ impl TryFrom<Cli> for CliCommand {
                     chunk_size: args.chunk_size,
                 })?;
                 Ok(Self::Import(config))
+            }
+            Command::BuildTree(args) => {
+                let config = BuildTreeConfig::from_options(BuildTreeOptions {
+                    store: args.store,
+                    browse_tree: args.browse_tree,
+                    db: args.db,
+                    dry_run: args.dry_run,
+                    hash_digits: args.hash_digits,
+                })?;
+                Ok(Self::BuildTree(config))
             }
         }
     }
@@ -90,5 +120,39 @@ pub fn render_import_report(report: &ImportReport) {
         println!("Source records updated: {}", report.source_records_updated);
         println!("Bytes seen: {}", report.bytes_seen);
         println!("Bytes written: {}", report.bytes_written);
+    }
+}
+
+pub fn render_build_tree_report(report: &BuildTreeReport) {
+    if report.dry_run {
+        println!("Dry run complete");
+        println!("Desired links: {}", report.desired_links);
+        println!("Links that would be created: {}", report.links_created);
+        println!(
+            "Links that would be left unchanged: {}",
+            report.links_unchanged
+        );
+        println!("Links that would be replaced: {}", report.links_replaced);
+        println!(
+            "Stale links that would be removed: {}",
+            report.stale_links_removed
+        );
+        println!(
+            "Directories that would be created: {}",
+            report.directories_created
+        );
+        println!(
+            "Directories that would be pruned: {}",
+            report.directories_pruned
+        );
+    } else {
+        println!("Build tree complete");
+        println!("Desired links: {}", report.desired_links);
+        println!("Links created: {}", report.links_created);
+        println!("Links unchanged: {}", report.links_unchanged);
+        println!("Links replaced: {}", report.links_replaced);
+        println!("Stale links removed: {}", report.stale_links_removed);
+        println!("Directories created: {}", report.directories_created);
+        println!("Directories pruned: {}", report.directories_pruned);
     }
 }
