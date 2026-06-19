@@ -6,9 +6,534 @@ use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, bail, eyre};
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 
+use crate::audit::{AuditFinding, push_finding};
 use crate::paths::{BlobHash, SourceRelativePath};
+use rusqlite::types::ValueRef;
+use std::collections::{BTreeSet, HashMap};
 
 const CURRENT_SCHEMA_VERSION: i64 = 1;
+const AUDIT_BEGIN_SQL: &str = include_str!("catalog/sql/audit_begin.sql");
+const AUDIT_BLOBS_SQL: &str = include_str!("catalog/sql/audit_blobs.sql");
+const AUDIT_COMMIT_SQL: &str = include_str!("catalog/sql/audit_commit.sql");
+const AUDIT_FOREIGN_KEY_CHECK_SQL: &str = include_str!("catalog/sql/audit_foreign_key_check.sql");
+const AUDIT_INTEGRITY_CHECK_SQL: &str = include_str!("catalog/sql/audit_integrity_check.sql");
+const AUDIT_SCHEMA_OBJECTS_SQL: &str = include_str!("catalog/sql/audit_schema_objects.sql");
+const AUDIT_TABLE_INFO_SQL: &str = include_str!("catalog/sql/audit_table_info.sql");
+const AUDIT_FOREIGN_KEYS_SQL: &str = include_str!("catalog/sql/audit_foreign_keys.sql");
+const AUDIT_INDEXES_SQL: &str = include_str!("catalog/sql/audit_indexes.sql");
+const AUDIT_INDEX_COLUMNS_SQL: &str = include_str!("catalog/sql/audit_index_columns.sql");
+const AUDIT_SOURCE_FILES_SQL: &str = include_str!("catalog/sql/audit_source_files.sql");
+
+#[derive(Clone, Debug)]
+pub struct CatalogBlob {
+    pub hash: BlobHash,
+    pub size_bytes: u64,
+}
+
+pub struct CatalogAuditSnapshot {
+    pub blob_rows_seen: u64,
+    pub gc_candidates: u64,
+    pub valid_blobs: HashMap<BlobHash, CatalogBlob>,
+    pub findings: Vec<AuditFinding>,
+}
+
+pub fn inspect_catalog_for_audit(path: &Path) -> Result<CatalogAuditSnapshot> {
+    let metadata =
+        fs::symlink_metadata(path).wrap_err_with(|| format!("stat catalog database {:?}", path))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("catalog database must be a real regular file: {:?}", path);
+    }
+    let wal = sidecar_path(path, "-wal");
+    let shm = sidecar_path(path, "-shm");
+    let wal_metadata = sidecar_metadata(&wal, "WAL")?;
+    let nonempty_wal = wal_metadata.is_some_and(|metadata| metadata.len() > 0);
+    if nonempty_wal {
+        if sidecar_metadata(&shm, "SHM")?.is_none() {
+            bail!(
+                "catalog has a non-empty WAL without a usable SHM; cleanly close/checkpoint a writer before auditing"
+            );
+        }
+        fs::File::open(&wal).wrap_err("open existing catalog WAL read-only")?;
+        fs::File::open(&shm).wrap_err("open existing catalog SHM read-only")?;
+    }
+    // `immutable=1` is safe only in the no-WAL branch: audit requires a
+    // quiescent catalog, and there are no committed frames outside the main
+    // database to ignore. It also prevents SQLite from creating sidecars.
+    let uri = sqlite_read_only_uri(path, !nonempty_wal)?;
+    let connection = Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .wrap_err_with(|| format!("open read-only catalog database {:?}", path))?;
+    let version: i64 = connection
+        .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
+        .wrap_err("read catalog schema version")?;
+    if version != CURRENT_SCHEMA_VERSION {
+        bail!("catalog schema version {version} is unsupported; expected {CURRENT_SCHEMA_VERSION}");
+    }
+    connection
+        .execute_batch(AUDIT_BEGIN_SQL)
+        .wrap_err("begin audit read transaction")?;
+    let mut findings = Vec::new();
+    {
+        let mut stmt = connection
+            .prepare(AUDIT_INTEGRITY_CHECK_SQL)
+            .wrap_err("prepare integrity check")?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .wrap_err("run integrity check")?;
+        for row in rows {
+            let message = row.wrap_err("read integrity result")?;
+            if message != "ok" {
+                push_finding(
+                    &mut findings,
+                    AuditFinding::new(
+                        "CATALOG_INTEGRITY",
+                        "integrity_check",
+                        format!("reason=integrity-check detail={}", bounded(&message)),
+                    ),
+                )?;
+            }
+        }
+    }
+    {
+        let mut stmt = connection
+            .prepare(AUDIT_FOREIGN_KEY_CHECK_SQL)
+            .wrap_err("prepare foreign key check")?;
+        let mut rows = stmt.query([]).wrap_err("run foreign key check")?;
+        while let Some(row) = rows.next().wrap_err("read foreign key result")? {
+            let table: String = row.get(0)?;
+            let rowid: Option<i64> = row.get(1)?;
+            let parent: String = row.get(2)?;
+            let fk: i64 = row.get(3)?;
+            push_finding(
+                &mut findings,
+                AuditFinding::new(
+                    "CATALOG_INTEGRITY",
+                    format!(
+                        "{table}:{}",
+                        rowid.map_or_else(|| "null".into(), |v| v.to_string())
+                    ),
+                    format!("reason=foreign-key parent={parent} fk={fk}"),
+                ),
+            )?;
+        }
+    }
+    validate_schema(&connection, &mut findings)?;
+    let mut valid_blobs = HashMap::new();
+    let mut blob_rows_seen = 0_u64;
+    let mut gc_candidates = 0_u64;
+    {
+        let mut stmt = connection
+            .prepare(AUDIT_BLOBS_SQL)
+            .wrap_err("prepare blob audit query")?;
+        let mut rows = stmt.query([]).wrap_err("query blobs for audit")?;
+        while let Some(row) = rows.next().wrap_err("enumerate blob rows")? {
+            blob_rows_seen = blob_rows_seen
+                .checked_add(1)
+                .ok_or_else(|| eyre!("blob row counter overflow"))?;
+            let rowid = row.get::<_, i64>(0).unwrap_or(-1);
+            let mut reasons = Vec::new();
+            let hash = match row.get_ref(1)? {
+                ValueRef::Text(v) => std::str::from_utf8(v)
+                    .ok()
+                    .and_then(|s| BlobHash::new(s.to_owned()).ok()),
+                _ => None,
+            };
+            if hash.is_none() {
+                reasons.push("invalid-hash");
+            }
+            let size = match row.get_ref(2)? {
+                ValueRef::Integer(v) if v >= 0 => Some(v as u64),
+                _ => None,
+            };
+            if size.is_none() {
+                reasons.push("invalid-size");
+            }
+            if !matches!(row.get_ref(3)?, ValueRef::Integer(_)) {
+                reasons.push("invalid-created-at");
+            }
+            match row.get_ref(4)? {
+                ValueRef::Null => {}
+                ValueRef::Integer(_) => {
+                    gc_candidates = gc_candidates
+                        .checked_add(1)
+                        .ok_or_else(|| eyre!("GC counter overflow"))?
+                }
+                _ => reasons.push("invalid-deleted-at"),
+            }
+            if reasons.is_empty() {
+                let hash = hash.expect("validated");
+                valid_blobs
+                    .try_reserve(1)
+                    .map_err(|error| eyre!("reserve catalog blob index: {error}"))?;
+                valid_blobs.insert(
+                    hash.clone(),
+                    CatalogBlob {
+                        hash,
+                        size_bytes: size.expect("validated"),
+                    },
+                );
+            } else {
+                push_finding(
+                    &mut findings,
+                    AuditFinding::new(
+                        "INVALID_BLOB_ROW",
+                        rowid.to_string(),
+                        format!("reason={}", reasons.join(",")),
+                    ),
+                )?;
+            }
+        }
+    }
+    {
+        let mut stmt = connection
+            .prepare(AUDIT_SOURCE_FILES_SQL)
+            .wrap_err("prepare source audit query")?;
+        let mut rows = stmt.query([]).wrap_err("query sources for audit")?;
+        while let Some(row) = rows.next().wrap_err("enumerate source rows")? {
+            let id = row.get::<_, i64>(0).unwrap_or(-1);
+            let mut reasons = Vec::new();
+            if !matches!(row.get_ref(1)?, ValueRef::Text(v) if !v.is_empty()) {
+                reasons.push("invalid-source-root");
+            }
+            let relative_ok = matches!(row.get_ref(2)?, ValueRef::Text(v) if std::str::from_utf8(v).ok().is_some_and(|s| SourceRelativePath::from_catalog_text(s).is_ok()));
+            if !relative_ok {
+                reasons.push("invalid-relative-path");
+            }
+            let blob = match row.get_ref(3)? {
+                ValueRef::Text(v) => std::str::from_utf8(v)
+                    .ok()
+                    .and_then(|s| BlobHash::new(s.to_owned()).ok()),
+                _ => None,
+            };
+            if blob.is_none() {
+                reasons.push("invalid-blob-hash");
+            }
+            let size = match row.get_ref(4)? {
+                ValueRef::Integer(v) if v >= 0 => Some(v as u64),
+                _ => None,
+            };
+            if size.is_none() {
+                reasons.push("invalid-size");
+            }
+            if !matches!(row.get_ref(5)?, ValueRef::Null | ValueRef::Integer(_)) {
+                reasons.push("invalid-modified-at");
+            }
+            let first = match row.get_ref(6)? {
+                ValueRef::Integer(v) => Some(v),
+                _ => None,
+            };
+            let last = match row.get_ref(7)? {
+                ValueRef::Integer(v) => Some(v),
+                _ => None,
+            };
+            if first.is_none() {
+                reasons.push("invalid-first-seen");
+            }
+            if last.is_none() {
+                reasons.push("invalid-last-seen");
+            }
+            if matches!((first,last),(Some(a),Some(b)) if a>b) {
+                reasons.push("reversed-seen-times");
+            }
+            if !matches!(row.get_ref(8)?, ValueRef::Integer(v) if v > 0) {
+                reasons.push("invalid-seen-count");
+            }
+            if let (Some(hash), Some(source_size)) = (&blob, size) {
+                match valid_blobs.get(hash) {
+                    Some(b) if b.size_bytes != source_size => {
+                        reasons.push("blob-size-disagreement")
+                    }
+                    None => reasons.push("missing-valid-blob"),
+                    _ => {}
+                }
+            }
+            if !reasons.is_empty() {
+                push_finding(
+                    &mut findings,
+                    AuditFinding::new(
+                        "INVALID_SOURCE_ROW",
+                        id.to_string(),
+                        format!("reason={}", reasons.join(",")),
+                    ),
+                )?;
+            }
+        }
+    }
+    connection
+        .execute_batch(AUDIT_COMMIT_SQL)
+        .wrap_err("finish audit read transaction")?;
+    Ok(CatalogAuditSnapshot {
+        blob_rows_seen,
+        gc_candidates,
+        valid_blobs,
+        findings,
+    })
+}
+
+fn bounded(value: &str) -> String {
+    value.chars().take(256).collect()
+}
+
+fn sidecar_metadata(path: &Path, label: &str) -> Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!(
+                "catalog {label} sidecar must be a real regular file: {:?}",
+                path
+            )
+        }
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).wrap_err_with(|| format!("stat catalog {label} sidecar {:?}", path))
+        }
+    }
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn sqlite_read_only_uri(path: &Path, immutable: bool) -> Result<String> {
+    let absolute = path
+        .canonicalize()
+        .wrap_err_with(|| format!("canonicalize catalog path {:?}", path))?;
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt;
+        absolute.as_os_str().as_bytes().to_vec()
+    };
+    #[cfg(not(unix))]
+    let bytes = absolute.to_string_lossy().into_owned().into_bytes();
+
+    let mut uri = String::from("file:");
+    uri.try_reserve(bytes.len().saturating_mul(3).saturating_add(32))
+        .map_err(|error| eyre!("reserve SQLite URI: {error}"))?;
+    for byte in bytes {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.' | b'~') {
+            uri.push(char::from(byte));
+        } else {
+            use std::fmt::Write;
+            write!(uri, "%{byte:02X}").expect("writing to String cannot fail");
+        }
+    }
+    uri.push_str("?mode=ro");
+    if immutable {
+        uri.push_str("&immutable=1");
+    }
+    Ok(uri)
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ColumnShape {
+    name: String,
+    declared_type: String,
+    not_null: bool,
+    primary_key: i64,
+}
+
+fn validate_schema(connection: &Connection, findings: &mut Vec<AuditFinding>) -> Result<()> {
+    let expected_objects = BTreeSet::from([
+        ("index".to_owned(), "idx_source_files_blob_hash".to_owned()),
+        ("table".to_owned(), "blobs".to_owned()),
+        ("table".to_owned(), "source_files".to_owned()),
+    ]);
+    let mut actual_objects = Vec::new();
+    let mut table_sql = HashMap::new();
+    {
+        let mut statement = connection.prepare(AUDIT_SCHEMA_OBJECTS_SQL)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let kind: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let sql: Option<String> = row.get(2)?;
+            actual_objects
+                .try_reserve(1)
+                .map_err(|error| eyre!("reserve schema object list: {error}"))?;
+            actual_objects.push((kind.clone(), name.clone()));
+            if kind == "table" {
+                table_sql
+                    .try_reserve(1)
+                    .map_err(|error| eyre!("reserve schema SQL index: {error}"))?;
+                table_sql.insert(name, sql.unwrap_or_default());
+            }
+        }
+    }
+    actual_objects.sort();
+    actual_objects.dedup();
+    for object in &expected_objects {
+        if !actual_objects.contains(object) {
+            schema_finding(findings, &object.1)?;
+        }
+    }
+    for object in &actual_objects {
+        if !expected_objects.contains(object) {
+            schema_finding(findings, &object.1)?;
+        }
+    }
+
+    let expected_blobs = [
+        ("hash", "TEXT", false, 1),
+        ("size_bytes", "INTEGER", true, 0),
+        ("created_at_ms", "INTEGER", true, 0),
+        ("deleted_at_ms", "INTEGER", false, 0),
+    ];
+    let expected_sources = [
+        ("id", "INTEGER", false, 1),
+        ("source_root", "TEXT", true, 0),
+        ("relative_path", "TEXT", true, 0),
+        ("blob_hash", "TEXT", true, 0),
+        ("size_bytes", "INTEGER", true, 0),
+        ("modified_at_ms", "INTEGER", false, 0),
+        ("first_seen_at_ms", "INTEGER", true, 0),
+        ("last_seen_at_ms", "INTEGER", true, 0),
+        ("seen_count", "INTEGER", true, 0),
+    ];
+    validate_columns(connection, "blobs", &expected_blobs, findings)?;
+    validate_columns(connection, "source_files", &expected_sources, findings)?;
+
+    let normalized_blobs = normalize_sql(table_sql.get("blobs").map_or("", String::as_str));
+    if !normalized_blobs.contains("check(length(hash)=64)") {
+        schema_finding(findings, "blobs.check.hash-length")?;
+    }
+    let normalized_sources =
+        normalize_sql(table_sql.get("source_files").map_or("", String::as_str));
+    if !normalized_sources.contains("check(length(source_root)>0)")
+        || !normalized_sources.contains("length(relative_path)>0")
+        || !normalized_sources.contains("substr(relative_path,1,1)!='/")
+    {
+        schema_finding(findings, "source_files.checks")?;
+    }
+
+    let foreign_keys = read_string_rows(connection, AUDIT_FOREIGN_KEYS_SQL, "source_files", 5)?;
+    if foreign_keys
+        != vec![vec![
+            String::from("blobs"),
+            String::from("blob_hash"),
+            String::from("hash"),
+            String::from("NO ACTION"),
+            String::from("NO ACTION"),
+        ]]
+    {
+        schema_finding(findings, "source_files.foreign-key")?;
+    }
+    let index_columns = read_string_rows(
+        connection,
+        AUDIT_INDEX_COLUMNS_SQL,
+        "idx_source_files_blob_hash",
+        1,
+    )?;
+    if index_columns != vec![vec![String::from("blob_hash")]] {
+        schema_finding(findings, "idx_source_files_blob_hash.columns")?;
+    }
+    let indexes = read_string_rows(connection, AUDIT_INDEXES_SQL, "source_files", 3)?;
+    let has_required_index = indexes
+        .iter()
+        .any(|row| row == &["idx_source_files_blob_hash", "0", "c"]);
+    let has_unique_identity = indexes.iter().any(|row| {
+        row.get(1).is_some_and(|value| value == "1")
+            && row.get(2).is_some_and(|value| value == "u")
+            && read_string_rows(connection, AUDIT_INDEX_COLUMNS_SQL, &row[0], 1).is_ok_and(
+                |columns| {
+                    columns
+                        == vec![
+                            vec![String::from("source_root")],
+                            vec![String::from("relative_path")],
+                        ]
+                },
+            )
+    });
+    if !has_required_index {
+        schema_finding(findings, "idx_source_files_blob_hash")?;
+    }
+    if !has_unique_identity {
+        schema_finding(findings, "source_files.unique-identity")?;
+    }
+    Ok(())
+}
+
+fn validate_columns(
+    connection: &Connection,
+    table: &str,
+    expected: &[(&str, &str, bool, i64)],
+    findings: &mut Vec<AuditFinding>,
+) -> Result<()> {
+    let mut statement = connection.prepare(AUDIT_TABLE_INFO_SQL)?;
+    let rows = statement.query_map([table], |row| {
+        Ok(ColumnShape {
+            name: row.get(0)?,
+            declared_type: row.get(1)?,
+            not_null: row.get::<_, i64>(2)? != 0,
+            primary_key: row.get(3)?,
+        })
+    })?;
+    let mut actual = Vec::new();
+    actual
+        .try_reserve(expected.len())
+        .map_err(|error| eyre!("reserve schema columns: {error}"))?;
+    for row in rows {
+        actual.push(row?);
+    }
+    let expected: Vec<_> = expected
+        .iter()
+        .map(|(name, ty, not_null, pk)| ColumnShape {
+            name: (*name).into(),
+            declared_type: (*ty).into(),
+            not_null: *not_null,
+            primary_key: *pk,
+        })
+        .collect();
+    if actual != expected {
+        schema_finding(findings, &format!("{table}.columns"))?;
+    }
+    Ok(())
+}
+
+fn read_string_rows(
+    connection: &Connection,
+    sql: &str,
+    argument: &str,
+    columns: usize,
+) -> Result<Vec<Vec<String>>> {
+    let mut statement = connection.prepare(sql)?;
+    let mut rows = statement.query([argument])?;
+    let mut output = Vec::new();
+    while let Some(row) = rows.next()? {
+        output
+            .try_reserve(1)
+            .map_err(|error| eyre!("reserve schema result: {error}"))?;
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(columns)
+            .map_err(|error| eyre!("reserve schema row: {error}"))?;
+        for index in 0..columns {
+            values.push(row.get::<_, String>(index)?);
+        }
+        output.push(values);
+    }
+    Ok(output)
+}
+
+fn schema_finding(findings: &mut Vec<AuditFinding>, identity: &str) -> Result<()> {
+    findings
+        .try_reserve(1)
+        .map_err(|error| eyre!("reserve schema finding: {error}"))?;
+    push_finding(
+        findings,
+        AuditFinding::new("CATALOG_INTEGRITY", identity, "reason=schema-mismatch"),
+    )
+}
+
+fn normalize_sql(sql: &str) -> String {
+    sql.to_ascii_lowercase()
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
 const INSERT_BLOB_SQL: &str = include_str!("catalog/sql/insert_blob.sql");
 const READ_USER_VERSION_SQL: &str = include_str!("catalog/sql/read_user_version.sql");
 const SCHEMA_V1_SQL: &str = include_str!("catalog/sql/schema_v1.sql");

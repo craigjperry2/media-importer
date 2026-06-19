@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use color_eyre::Result;
 
+use crate::audit::AuditReport;
 use crate::config::{
-    BuildTreeConfig, BuildTreeOptions, DEFAULT_CHUNK_SIZE, DEFAULT_HASH_DIGITS, ImportConfig,
-    ImportOptions,
+    AuditConfig, AuditOptions, BuildTreeConfig, BuildTreeOptions, DEFAULT_CHUNK_SIZE,
+    DEFAULT_HASH_DIGITS, ImportConfig, ImportOptions,
 };
 use crate::ingest::ImportReport;
 use crate::materialize::BuildTreeReport;
@@ -22,6 +23,18 @@ pub struct Cli {
 enum Command {
     Import(ImportArgs),
     BuildTree(BuildTreeArgs),
+    /// Verify catalog and CAS integrity without modifying either.
+    Audit(AuditArgs),
+}
+
+#[derive(Debug, Parser)]
+struct AuditArgs {
+    #[arg(long)]
+    store: PathBuf,
+    #[arg(long)]
+    db: Option<PathBuf>,
+    #[arg(long, default_value_t = DEFAULT_CHUNK_SIZE)]
+    chunk_size: NonZeroUsize,
 }
 
 #[derive(Debug, Parser)]
@@ -55,6 +68,7 @@ struct BuildTreeArgs {
 pub enum CliCommand {
     Import(ImportConfig),
     BuildTree(BuildTreeConfig),
+    Audit(AuditConfig),
 }
 
 impl Cli {
@@ -88,8 +102,37 @@ impl TryFrom<Cli> for CliCommand {
                 })?;
                 Ok(Self::BuildTree(config))
             }
+            Command::Audit(args) => Ok(Self::Audit(AuditConfig::from_options(AuditOptions {
+                store: args.store,
+                db: args.db,
+                chunk_size: args.chunk_size,
+            })?)),
         }
     }
+}
+
+pub fn render_audit_report(report: &AuditReport) {
+    if report.is_clean() {
+        println!("Audit clean");
+    } else {
+        for finding in &report.findings {
+            if finding.details.is_empty() {
+                println!("{} {}", finding.category, finding.identity);
+            } else {
+                println!(
+                    "{} {} {}",
+                    finding.category, finding.identity, finding.details
+                );
+            }
+        }
+        println!();
+        println!("Audit complete");
+    }
+    println!("Catalog blobs: {}", report.catalog_blobs);
+    println!("CAS blob files: {}", report.cas_blob_files);
+    println!("Blobs hashed: {}", report.blobs_hashed);
+    println!("GC candidates: {}", report.gc_candidates);
+    println!("Findings: {}", report.findings.len());
 }
 
 pub fn render_import_report(report: &ImportReport) {

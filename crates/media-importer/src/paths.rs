@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BlobHash(String);
 
 impl BlobHash {
@@ -64,7 +64,7 @@ impl StoreRoot {
         })
     }
 
-    pub fn validate_existing_for_build_tree(path: &Path) -> Result<Self> {
+    pub fn validate_existing(path: &Path) -> Result<Self> {
         let link_metadata = std::fs::symlink_metadata(path)
             .wrap_err_with(|| format!("stat store path {:?}", path))?;
         if link_metadata.file_type().is_symlink() {

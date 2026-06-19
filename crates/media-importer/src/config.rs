@@ -49,6 +49,41 @@ pub struct BuildTreeOptions {
     pub hash_digits: NonZeroUsize,
 }
 
+#[derive(Clone, Debug)]
+pub struct AuditConfig {
+    pub store_root: StoreRoot,
+    pub db_path: PathBuf,
+    pub chunk_size: NonZeroUsize,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuditOptions {
+    pub store: PathBuf,
+    pub db: Option<PathBuf>,
+    pub chunk_size: NonZeroUsize,
+}
+
+impl AuditConfig {
+    pub fn from_options(options: AuditOptions) -> Result<Self> {
+        let store_root = StoreRoot::validate_existing(&options.store)?;
+        let db_path = options.db.unwrap_or_else(|| store_root.default_db_path());
+        let metadata = std::fs::symlink_metadata(&db_path).map_err(|error| {
+            color_eyre::eyre::eyre!("stat catalog database {:?}: {error}", db_path)
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!(
+                "catalog database must be an existing regular file, not a symlink: {:?}",
+                db_path
+            );
+        }
+        Ok(Self {
+            store_root,
+            db_path,
+            chunk_size: options.chunk_size,
+        })
+    }
+}
+
 impl ImportConfig {
     pub fn from_options(options: ImportOptions) -> Result<Self> {
         let source_root = SourceRoot::validate(&options.source)?;
@@ -76,7 +111,7 @@ impl BuildTreeConfig {
         if options.hash_digits.get() > 64 {
             bail!("--hash-digits must be in the range 1..=64");
         }
-        let store_root = StoreRoot::validate_existing_for_build_tree(&options.store)?;
+        let store_root = StoreRoot::validate_existing(&options.store)?;
         let browse_tree_root = BrowseTreeRoot::validate(&options.browse_tree)?;
         let db_was_explicit = options.db.is_some();
         let db_path = match options.db {

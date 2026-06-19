@@ -624,6 +624,7 @@ dependencies = [
  "clap",
  "color-eyre",
  "predicates",
+ "regex",
  "rusqlite",
  "tracing",
  "tracing-subscriber",
