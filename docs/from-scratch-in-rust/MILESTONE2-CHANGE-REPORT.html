@@ -1,0 +1,1854 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A detailed change report and required knowledge check for Media Importer Milestone 2 browse-tree materialization."
+    />
+    <title>Media Importer - Milestone 2 Change Report</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #17242d;
+        --muted: #5d6a71;
+        --paper: #f3f2ed;
+        --surface: #fffefb;
+        --line: #d7d6d0;
+        --navy: #18384b;
+        --teal: #147a78;
+        --teal-soft: #e5f3f0;
+        --amber: #aa6424;
+        --amber-soft: #fff0de;
+        --red: #a34640;
+        --red-soft: #fbeae7;
+        --green: #397149;
+        --green-soft: #e9f4eb;
+        --blue-soft: #e8f0f7;
+        --purple: #67558a;
+        --purple-soft: #efebf7;
+        --shadow: 0 18px 50px rgba(31, 44, 51, 0.09);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background:
+          linear-gradient(90deg, rgba(20, 122, 120, 0.045) 1px, transparent 1px),
+          linear-gradient(rgba(20, 122, 120, 0.045) 1px, transparent 1px),
+          linear-gradient(180deg, #fbfaf6, var(--paper));
+        background-size:
+          36px 36px,
+          36px 36px,
+          auto;
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        line-height: 1.65;
+      }
+
+      a {
+        color: var(--teal);
+        text-underline-offset: 3px;
+      }
+
+      a:hover {
+        color: #0f5d5b;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      code,
+      pre,
+      .mono {
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      code {
+        padding: 0.12em 0.34em;
+        border: 1px solid #d9dedf;
+        border-radius: 4px;
+        background: #f5f7f6;
+        color: #24434f;
+        font-size: 0.9em;
+      }
+
+      pre {
+        overflow-x: auto;
+        margin: 16px 0 0;
+        padding: 18px;
+        border: 1px solid #294354;
+        border-radius: 8px;
+        background: #132b3a;
+        color: #eaf5f3;
+        font-size: 0.84rem;
+        line-height: 1.6;
+      }
+
+      pre code {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+      }
+
+      h1,
+      h2,
+      h3,
+      h4,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 900px;
+        margin-bottom: 18px;
+        color: var(--navy);
+        font-size: clamp(2.7rem, 6.5vw, 5.7rem);
+        line-height: 0.98;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        margin-bottom: 14px;
+        color: var(--navy);
+        font-size: clamp(1.75rem, 3vw, 2.6rem);
+        line-height: 1.1;
+        letter-spacing: 0;
+      }
+
+      h3 {
+        margin-bottom: 8px;
+        color: var(--navy);
+        font-size: 1.12rem;
+        line-height: 1.3;
+      }
+
+      h4 {
+        margin-bottom: 6px;
+        color: var(--navy);
+        font-size: 0.96rem;
+      }
+
+      p,
+      li,
+      td {
+        color: var(--muted);
+      }
+
+      .scroll-progress {
+        position: fixed;
+        z-index: 100;
+        top: 0;
+        left: 0;
+        width: 0;
+        height: 4px;
+        background: linear-gradient(90deg, var(--teal), var(--amber));
+      }
+
+      .page {
+        width: min(1280px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 44px 0 80px;
+      }
+
+      .hero {
+        position: relative;
+        display: grid;
+        grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.7fr);
+        gap: 34px;
+        align-items: end;
+        overflow: hidden;
+        padding: clamp(28px, 5vw, 64px);
+        border: 1px solid rgba(23, 54, 74, 0.16);
+        border-radius: 16px;
+        background: rgba(255, 254, 251, 0.96);
+        box-shadow: var(--shadow);
+      }
+
+      .hero::after {
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 12px;
+        height: 100%;
+        background: linear-gradient(180deg, var(--teal), var(--amber));
+        content: "";
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        gap: 9px;
+        align-items: center;
+        margin-bottom: 18px;
+        color: var(--teal);
+        font-size: 0.78rem;
+        font-weight: 850;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow::before {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--teal);
+        box-shadow: 0 0 0 5px rgba(20, 122, 120, 0.12);
+        content: "";
+      }
+
+      .lead {
+        max-width: 810px;
+        margin-bottom: 0;
+        color: #40535e;
+        font-size: clamp(1.04rem, 1.8vw, 1.28rem);
+      }
+
+      .hero-aside {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        gap: 10px;
+      }
+
+      .metric {
+        display: grid;
+        grid-template-columns: 100px minmax(0, 1fr);
+        gap: 14px;
+        align-items: baseline;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .metric:last-child {
+        border-bottom: 0;
+      }
+
+      .metric strong {
+        color: var(--navy);
+        font-size: 1.15rem;
+      }
+
+      .metric span {
+        color: var(--muted);
+        font-size: 0.86rem;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 240px minmax(0, 1fr);
+        gap: 44px;
+        margin-top: 44px;
+      }
+
+      .toc {
+        position: sticky;
+        top: 28px;
+        align-self: start;
+        max-height: calc(100vh - 56px);
+        overflow-y: auto;
+        padding: 18px 0;
+        border-top: 3px solid var(--teal);
+        border-bottom: 1px solid var(--line);
+      }
+
+      .toc strong {
+        display: block;
+        margin-bottom: 10px;
+        color: var(--navy);
+        font-size: 0.78rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .toc a {
+        display: block;
+        padding: 7px 10px;
+        border-left: 3px solid transparent;
+        color: var(--muted);
+        font-size: 0.84rem;
+        text-decoration: none;
+      }
+
+      .toc a:hover,
+      .toc a.active {
+        border-left-color: var(--teal);
+        background: var(--teal-soft);
+        color: var(--navy);
+      }
+
+      main {
+        min-width: 0;
+      }
+
+      section {
+        scroll-margin-top: 24px;
+        padding: 42px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      section:first-child {
+        padding-top: 12px;
+      }
+
+      .section-kicker {
+        margin-bottom: 9px;
+        color: var(--teal);
+        font-size: 0.76rem;
+        font-weight: 850;
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+      }
+
+      .section-intro {
+        max-width: 850px;
+        color: #475a64;
+        font-size: 1.04rem;
+      }
+
+      .callout {
+        margin: 22px 0;
+        padding: 18px 20px;
+        border-left: 5px solid var(--teal);
+        background: var(--teal-soft);
+      }
+
+      .callout.warning {
+        border-left-color: var(--amber);
+        background: var(--amber-soft);
+      }
+
+      .callout.danger {
+        border-left-color: var(--red);
+        background: var(--red-soft);
+      }
+
+      .callout p:last-child {
+        margin-bottom: 0;
+      }
+
+      .grid-2,
+      .grid-3,
+      .grid-4 {
+        display: grid;
+        gap: 16px;
+        margin-top: 20px;
+      }
+
+      .grid-2 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .grid-3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .grid-4 {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .concept {
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 254, 251, 0.8);
+      }
+
+      .concept p:last-child,
+      .concept ul:last-child {
+        margin-bottom: 0;
+      }
+
+      .number {
+        display: inline-grid;
+        width: 30px;
+        height: 30px;
+        margin-bottom: 12px;
+        place-items: center;
+        border-radius: 50%;
+        background: var(--navy);
+        color: white;
+        font-size: 0.8rem;
+        font-weight: 800;
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 10px;
+        margin: 24px 0;
+      }
+
+      .flow-step {
+        position: relative;
+        min-height: 132px;
+        padding: 16px;
+        border-top: 4px solid var(--teal);
+        background: var(--surface);
+        box-shadow: 0 5px 18px rgba(31, 44, 51, 0.07);
+      }
+
+      .flow-step:not(:last-child)::after {
+        position: absolute;
+        z-index: 2;
+        top: 48%;
+        right: -12px;
+        color: var(--amber);
+        content: ">";
+        font-size: 1.3rem;
+        font-weight: 900;
+      }
+
+      .flow-step strong {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--navy);
+      }
+
+      .flow-step span {
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      .tree {
+        margin: 22px 0;
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        color: #314751;
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 0.88rem;
+        line-height: 1.8;
+        white-space: pre-wrap;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+        margin: 20px 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+      }
+
+      th,
+      td {
+        padding: 13px 15px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        background: #edf1ef;
+        color: var(--navy);
+        font-size: 0.78rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .tag {
+        display: inline-block;
+        padding: 3px 8px;
+        border: 1px solid #cdd7d5;
+        border-radius: 999px;
+        background: var(--teal-soft);
+        color: #175e5c;
+        font-size: 0.75rem;
+        font-weight: 750;
+      }
+
+      .tag.amber {
+        border-color: #ead1b5;
+        background: var(--amber-soft);
+        color: #82501f;
+      }
+
+      .tag.red {
+        border-color: #e5c4c0;
+        background: var(--red-soft);
+        color: #853b36;
+      }
+
+      .tag.purple {
+        border-color: #d9d0e8;
+        background: var(--purple-soft);
+        color: var(--purple);
+      }
+
+      .sequence {
+        margin: 24px 0 0;
+        padding: 0;
+        list-style: none;
+        counter-reset: steps;
+      }
+
+      .sequence li {
+        position: relative;
+        min-height: 54px;
+        padding: 3px 0 20px 52px;
+        counter-increment: steps;
+      }
+
+      .sequence li::before {
+        position: absolute;
+        top: 0;
+        left: 0;
+        display: grid;
+        width: 34px;
+        height: 34px;
+        place-items: center;
+        border-radius: 50%;
+        background: var(--navy);
+        color: white;
+        content: counter(steps);
+        font-size: 0.8rem;
+        font-weight: 800;
+      }
+
+      .sequence li:not(:last-child)::after {
+        position: absolute;
+        top: 34px;
+        bottom: 0;
+        left: 16px;
+        width: 2px;
+        background: var(--line);
+        content: "";
+      }
+
+      .sequence strong {
+        color: var(--navy);
+      }
+
+      .file-list {
+        margin: 20px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .file-list li {
+        display: grid;
+        grid-template-columns: minmax(250px, 0.75fr) minmax(0, 1.25fr);
+        gap: 22px;
+        padding: 14px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .file-list li:last-child {
+        border-bottom: 0;
+      }
+
+      .file-list a {
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 0.84rem;
+        font-weight: 700;
+      }
+
+      .file-list span {
+        color: var(--muted);
+      }
+
+      .quiz-intro {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 22px;
+        align-items: center;
+        margin: 20px 0 26px;
+        padding: 20px;
+        border: 1px solid #d9d0e8;
+        border-left: 5px solid var(--purple);
+        background: var(--purple-soft);
+      }
+
+      .quiz-intro p {
+        margin-bottom: 0;
+      }
+
+      .pass-mark {
+        color: var(--purple);
+        font-size: 1.5rem;
+        font-weight: 900;
+        white-space: nowrap;
+      }
+
+      .question {
+        margin: 0 0 18px;
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+
+      .question legend {
+        max-width: 90%;
+        padding: 0 8px;
+        color: var(--navy);
+        font-weight: 800;
+      }
+
+      .option {
+        display: block;
+        margin: 9px 0;
+        padding: 10px 12px;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        color: var(--muted);
+        cursor: pointer;
+      }
+
+      .option:hover {
+        border-color: #c9d8d5;
+        background: var(--teal-soft);
+      }
+
+      .option input {
+        margin-right: 9px;
+        accent-color: var(--teal);
+      }
+
+      .explanation {
+        display: none;
+        margin: 14px 0 0;
+        padding: 12px 14px;
+        border-left: 4px solid var(--amber);
+        background: var(--amber-soft);
+        font-size: 0.9rem;
+      }
+
+      .question.graded .explanation {
+        display: block;
+      }
+
+      .question.correct {
+        border-color: #8cb998;
+        background: var(--green-soft);
+      }
+
+      .question.incorrect {
+        border-color: #d39b96;
+        background: var(--red-soft);
+      }
+
+      .quiz-actions {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-top: 24px;
+      }
+
+      .button {
+        min-height: 44px;
+        padding: 10px 17px;
+        border: 1px solid var(--navy);
+        border-radius: 6px;
+        background: var(--navy);
+        color: white;
+        cursor: pointer;
+        font-weight: 800;
+      }
+
+      .button:hover {
+        background: #23516b;
+      }
+
+      .button.secondary {
+        background: transparent;
+        color: var(--navy);
+      }
+
+      .button.secondary:hover {
+        background: var(--blue-soft);
+      }
+
+      .small {
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      .quiz-result {
+        display: none;
+        margin-top: 18px;
+        padding: 18px;
+        border-left: 5px solid;
+        font-weight: 750;
+      }
+
+      .quiz-result.pass,
+      .quiz-result.fail {
+        display: block;
+      }
+
+      .quiz-result.pass {
+        border-color: var(--green);
+        background: var(--green-soft);
+        color: #285835;
+      }
+
+      .quiz-result.fail {
+        border-color: var(--red);
+        background: var(--red-soft);
+        color: #7d342f;
+      }
+
+      .footer {
+        padding-top: 28px;
+        color: var(--muted);
+        font-size: 0.84rem;
+        text-align: center;
+      }
+
+      @media (max-width: 1050px) {
+        .hero,
+        .layout {
+          grid-template-columns: 1fr;
+        }
+
+        .toc {
+          position: static;
+          max-height: none;
+          columns: 2;
+        }
+
+        .toc strong {
+          column-span: all;
+        }
+
+        .grid-4,
+        .flow {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .flow-step:not(:last-child)::after {
+          display: none;
+        }
+      }
+
+      @media (max-width: 760px) {
+        .page {
+          width: min(100% - 20px, 1280px);
+          padding-top: 18px;
+        }
+
+        .hero {
+          padding: 26px 22px;
+        }
+
+        h1 {
+          font-size: clamp(2.35rem, 14vw, 4rem);
+        }
+
+        .grid-2,
+        .grid-3,
+        .grid-4,
+        .flow,
+        .quiz-intro {
+          grid-template-columns: 1fr;
+        }
+
+        .toc {
+          columns: 1;
+        }
+
+        .file-list li {
+          grid-template-columns: 1fr;
+          gap: 4px;
+        }
+
+        .metric {
+          grid-template-columns: 82px minmax(0, 1fr);
+        }
+
+        th,
+        td {
+          padding: 11px 12px;
+        }
+      }
+
+      @media print {
+        body {
+          background: white;
+        }
+
+        .scroll-progress,
+        .toc,
+        .quiz-actions {
+          display: none;
+        }
+
+        .page {
+          width: 100%;
+          padding: 0;
+        }
+
+        .hero {
+          box-shadow: none;
+        }
+
+        .layout {
+          display: block;
+        }
+
+        section {
+          break-inside: avoid;
+        }
+
+        .explanation {
+          display: block;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="scroll-progress" id="scroll-progress" aria-hidden="true"></div>
+    <div class="page">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Media Importer / Rust rewrite / Milestone 2</div>
+          <h1>From opaque hashes to a browsable library.</h1>
+          <p class="lead">
+            Milestone 2 added a safe, repeatable projection from the SQLite catalog and
+            content-addressed store into a human-friendly tree of relative symlinks. This report
+            explains the motivation, mental model, implementation, safety rules, test evidence,
+            and the details you need to reason about future changes.
+          </p>
+        </div>
+        <aside class="hero-aside" aria-label="Change summary">
+          <div class="metric"><strong>10b1566</strong><span>implementation snapshot</span></div>
+          <div class="metric"><strong>9 files</strong><span>changed or added</span></div>
+          <div class="metric"><strong>1,148</strong><span>lines added in the commit</span></div>
+          <div class="metric"><strong>14 CLI</strong><span>integration tests after the change</span></div>
+          <div class="metric"><strong>10 / 12</strong><span>quiz score required to pass</span></div>
+        </aside>
+      </header>
+
+      <div class="layout">
+        <nav class="toc" aria-label="Report sections">
+          <strong>Contents</strong>
+          <a href="#orientation">1. Outcome</a>
+          <a href="#context">2. Why it exists</a>
+          <a href="#mental-model">3. Mental model</a>
+          <a href="#contract">4. CLI contract</a>
+          <a href="#paths">5. Path safety</a>
+          <a href="#catalog">6. Catalog projection</a>
+          <a href="#naming">7. Naming and links</a>
+          <a href="#ownership">8. Ownership rules</a>
+          <a href="#planning">9. Plan and apply</a>
+          <a href="#filesystem">10. Filesystem changes</a>
+          <a href="#architecture">11. Code map</a>
+          <a href="#testing">12. Test evidence</a>
+          <a href="#limits">13. Limits and implications</a>
+          <a href="#quiz">14. Required quiz</a>
+        </nav>
+
+        <main>
+          <section id="orientation">
+            <div class="section-kicker">The outcome</div>
+            <h2>One new command turns durable storage truth into a disposable view.</h2>
+            <p class="section-intro">
+              Before this milestone, imported media existed safely but inconveniently: blob
+              filenames were 64-character BLAKE3 hashes arranged for machine access. The new
+              <code>build-tree</code> command reads the live catalog and creates a separate tree
+              whose names resemble the original source paths.
+            </p>
+
+            <div class="callout">
+              <h3>The central idea</h3>
+              <p>
+                The catalog and CAS are authoritative. The browse tree is derived state. It can be
+                rebuilt, reconciled, or discarded without changing the stored media or catalog.
+              </p>
+            </div>
+
+            <div class="grid-3">
+              <article class="concept">
+                <span class="tag">Input</span>
+                <h3>SQLite catalog</h3>
+                <p>Supplies live source-relative paths, full blob hashes, and expected sizes.</p>
+              </article>
+              <article class="concept">
+                <span class="tag amber">Proof</span>
+                <h3>Content-addressed store</h3>
+                <p>Supplies the actual regular files that each desired link must target.</p>
+              </article>
+              <article class="concept">
+                <span class="tag purple">Output</span>
+                <h3>Browse tree</h3>
+                <p>Contains relative symlinks with readable names plus short hash suffixes.</p>
+              </article>
+            </div>
+          </section>
+
+          <section id="context">
+            <div class="section-kicker">Context and intuition</div>
+            <h2>The CAS solves identity; the browse tree solves navigation.</h2>
+            <p class="section-intro">
+              Content-addressed storage names a blob by what its bytes are. That is excellent for
+              deduplication and integrity, but poor for a person looking for
+              <code>Movies/Clashing Name.mp4</code>. Milestone 2 deliberately keeps those concerns
+              separate.
+            </p>
+
+            <div class="tree" aria-label="Store and browse tree example">store/
+  catalog.sqlite
+  blobs/
+    ab/
+      c1/
+        abc123...full-64-character-hash
+
+browse/
+  Movies/
+    Clashing Name_abc123.mp4
+      -> ../../store/blobs/ab/c1/abc123...full-64-character-hash</div>
+
+            <div class="grid-2">
+              <article class="concept">
+                <h3>Why not rename blobs?</h3>
+                <p>
+                  The full hash is the blob's stable identity. Human names can collide, change, or
+                  appear under multiple source roots. Renaming blobs would weaken the CAS model.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>Why symlinks?</h3>
+                <p>
+                  Symlinks add a cheap presentation layer without duplicating media bytes. Multiple
+                  readable names can point to one deduplicated blob.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>Why a hash suffix?</h3>
+                <p>
+                  The source-relative path alone is not globally unique across source roots. A short
+                  hash prefix distinguishes different content while keeping names readable.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>Why rebuild instead of update during import?</h3>
+                <p>
+                  Import remains focused on durable ingestion. Presentation is reconciled offline,
+                  which keeps source scanning, CAS mutation, catalog writes, and view generation
+                  independently understandable.
+                </p>
+              </article>
+            </div>
+          </section>
+
+          <section id="mental-model">
+            <div class="section-kicker">Mental model</div>
+            <h2>Read truth, prove targets, compare state, then reconcile.</h2>
+            <p class="section-intro">
+              The implementation is easiest to understand as five transformations. Only the final
+              one mutates the browse tree.
+            </p>
+
+            <div class="flow" aria-label="Build tree data flow">
+              <div class="flow-step">
+                <strong>1. Validate</strong>
+                <span>Canonicalize roots, reject overlap, check hash-digit range.</span>
+              </div>
+              <div class="flow-step">
+                <strong>2. Project</strong>
+                <span>Read live catalog rows and derive desired output paths.</span>
+              </div>
+              <div class="flow-step">
+                <strong>3. Prove</strong>
+                <span>Require each CAS target to be a regular file with the cataloged size.</span>
+              </div>
+              <div class="flow-step">
+                <strong>4. Diff</strong>
+                <span>Classify links, blockers, stale owned links, and directories.</span>
+              </div>
+              <div class="flow-step">
+                <strong>5. Apply</strong>
+                <span>Create or replace desired links, clean stale links, prune empty dirs.</span>
+              </div>
+            </div>
+
+            <p>
+              Dry-run follows the same first four stages and returns the same plan counters, but it
+              skips stage five. This is important: dry-run is not a second, approximate
+              implementation.
+            </p>
+          </section>
+
+          <section id="contract">
+            <div class="section-kicker">Command surface</div>
+            <h2>The CLI added one narrow, complete command.</h2>
+            <pre><code>media-importer build-tree \
+  --store &lt;STORE_ROOT&gt; \
+  --browse-tree &lt;BROWSE_TREE_ROOT&gt; \
+  [--db &lt;DB_PATH&gt;] \
+  [--dry-run] \
+  [--hash-digits &lt;N&gt;]</code></pre>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Argument</th>
+                    <th>Behavior</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>--store</code></td>
+                    <td>Required; must already be a real directory with a real <code>blobs/</code>.</td>
+                    <td>Materialization consumes an existing store and never initializes one.</td>
+                  </tr>
+                  <tr>
+                    <td><code>--browse-tree</code></td>
+                    <td>Required; may exist as a real directory or be one missing final component.</td>
+                    <td>The command may create the browse root, but not arbitrary parent paths.</td>
+                  </tr>
+                  <tr>
+                    <td><code>--db</code></td>
+                    <td>Defaults to <code>&lt;store&gt;/catalog.sqlite</code>.</td>
+                    <td>An explicit catalog may live in the store, but never inside the browse tree.</td>
+                  </tr>
+                  <tr>
+                    <td><code>--dry-run</code></td>
+                    <td>Runs validation and planning, reports "would" counters, mutates nothing.</td>
+                    <td>Users can inspect reconciliation before filesystem changes.</td>
+                  </tr>
+                  <tr>
+                    <td><code>--hash-digits</code></td>
+                    <td>Defaults to 6; accepts 1 through 64 inclusive.</td>
+                    <td>Controls presentation-name disambiguation without changing blob identity.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="callout warning">
+              <h3>Milestone scope stayed narrow</h3>
+              <p>
+                This change exposed <code>build-tree</code> beside <code>import</code>. It did not
+                expose placeholder <code>gc</code>, <code>audit</code>, or <code>--json</code>
+                behavior.
+              </p>
+            </div>
+
+            <h3>Stable reporting contract</h3>
+            <p>
+              <code>BuildTreeReport</code> carries desired, created, unchanged, replaced, stale
+              removed, directory created, and directory pruned counts. The CLI renders real and
+              dry-run wording from the same fields.
+            </p>
+          </section>
+
+          <section id="paths">
+            <div class="section-kicker">Path safety</div>
+            <h2>Path validation is part of the security boundary.</h2>
+            <p class="section-intro">
+              This command creates and deletes filesystem entries, so path spelling cannot be
+              treated as cosmetic. The implementation canonicalizes trusted roots and validates
+              persisted relative paths again before joining them.
+            </p>
+
+            <div class="grid-2">
+              <article class="concept">
+                <span class="number">1</span>
+                <h3>Store root</h3>
+                <p>
+                  <code>StoreRoot::validate_existing_for_build_tree</code> uses
+                  <code>symlink_metadata</code>, rejects a symlink root, requires a directory,
+                  canonicalizes it, and requires <code>blobs/</code> to be a real directory.
+                </p>
+              </article>
+              <article class="concept">
+                <span class="number">2</span>
+                <h3>Browse root</h3>
+                <p>
+                  An existing root must be a real directory. For a missing root, its real existing
+                  parent is canonicalized and the intended final component is appended.
+                </p>
+              </article>
+              <article class="concept">
+                <span class="number">3</span>
+                <h3>Overlap</h3>
+                <p>
+                  Store-inside-browse and browse-inside-store are both rejected. An explicit DB path
+                  inside the browse tree is rejected as well.
+                </p>
+              </article>
+              <article class="concept">
+                <span class="number">4</span>
+                <h3>Catalog paths</h3>
+                <p>
+                  Persisted paths must be non-empty, slash-normalized relative UTF-8 paths. Absolute
+                  paths, <code>.</code>, <code>..</code>, empty components, backslashes, drive-like
+                  prefixes, and UNC-like forms are rejected.
+                </p>
+              </article>
+            </div>
+
+            <div class="callout danger">
+              <h3>Why validate catalog paths again?</h3>
+              <p>
+                Milestone 1 normally writes safe relative paths, but persisted data is a trust
+                boundary. A manually edited or damaged catalog must not turn
+                <code>browse_root.join(relative_path)</code> into traversal outside the generated
+                tree.
+              </p>
+            </div>
+          </section>
+
+          <section id="catalog">
+            <div class="section-kicker">Read-only catalog projection</div>
+            <h2>The catalog API returns typed desired-state ingredients, not raw rows.</h2>
+            <p class="section-intro">
+              Materialization gained a dedicated read-only opener. It does not migrate or create a
+              database and requires schema version exactly 1.
+            </p>
+
+            <pre><code>SELECT
+    source_files.relative_path,
+    source_files.blob_hash,
+    blobs.size_bytes
+FROM source_files
+JOIN blobs ON blobs.hash = source_files.blob_hash
+WHERE blobs.deleted_at_ms IS NULL
+GROUP BY source_files.relative_path, source_files.blob_hash
+ORDER BY source_files.relative_path, source_files.blob_hash;</code></pre>
+
+            <div class="grid-3">
+              <article class="concept">
+                <h3>Live only</h3>
+                <p>
+                  Rows whose blob has a non-null <code>deleted_at_ms</code> are excluded from the
+                  desired browse tree.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>Deliberate dedupe</h3>
+                <p>
+                  Grouping by relative path and full blob hash collapses duplicate observations
+                  that would produce the same desired link.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>Deterministic order</h3>
+                <p>
+                  Ordering by relative path and hash makes planning and diagnostics stable across
+                  runs.
+                </p>
+              </article>
+            </div>
+
+            <p>
+              Rows are decoded into <code>LiveMaterializationEntry</code>, which contains a
+              validated <code>SourceRelativePath</code>, validated <code>BlobHash</code>, and
+              unsigned expected size. SQL remains in the catalog boundary through a colocated
+              <code>.sql</code> file.
+            </p>
+          </section>
+
+          <section id="naming">
+            <div class="section-kicker">Presentation naming</div>
+            <h2>Only the final filename changes; its full blob identity does not.</h2>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Catalog relative path</th>
+                    <th>Hash begins</th>
+                    <th>Default browse path</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>Movies/Clashing Name.mp4</code></td>
+                    <td><code>abc123...</code></td>
+                    <td><code>Movies/Clashing Name_abc123.mp4</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>Movies/README</code></td>
+                    <td><code>abc123...</code></td>
+                    <td><code>Movies/README_abc123</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>Movies/.env</code></td>
+                    <td><code>abc123...</code></td>
+                    <td><code>Movies/.env_abc123</code></td>
+                  </tr>
+                  <tr>
+                    <td><code>archive.tar.gz</code></td>
+                    <td><code>abc123...</code></td>
+                    <td><code>archive.tar_abc123.gz</code></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h3>Filename intuition</h3>
+            <p>
+              If the filename has a non-empty stem before its final extension, the suffix is
+              inserted before that extension. Dotfiles and extensionless names receive the suffix
+              at the end. Multiple-dot names preserve only the final extension as the extension.
+            </p>
+
+            <h3>Collision handling</h3>
+            <p>
+              A <code>BTreeMap</code> is keyed by the transformed output path. If two different
+              catalog entries collapse to the same path because their selected hash prefixes match,
+              planning fails before mutation and recommends rebuilding with more digits, such as
+              <code>--hash-digits 12</code>.
+            </p>
+
+            <div class="callout">
+              <h3>Symlink targets are relative</h3>
+              <p>
+                The target text is calculated from each link's parent directory to the absolute CAS
+                blob path. This makes the generated tree independent of the current working
+                directory and avoids storing an absolute target when a canonical relative target is
+                available.
+              </p>
+            </div>
+          </section>
+
+          <section id="ownership">
+            <div class="section-kicker">Generated versus user-managed state</div>
+            <h2>Ownership is inferred from where a symlink points.</h2>
+            <p class="section-intro">
+              The browse tree may contain user files or user-managed symlinks. The tool therefore
+              needs a conservative rule for what it is allowed to replace or remove.
+            </p>
+
+            <div class="callout">
+              <p>
+                An <strong>owned symlink</strong> is under the browse root and its target text,
+                interpreted relative to the symlink parent and normalized lexically, points inside
+                the configured store's <code>blobs/</code> tree.
+              </p>
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Existing entry</th>
+                    <th>At desired path?</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Owned symlink with exact expected target text</td>
+                    <td>Yes</td>
+                    <td><span class="tag">Unchanged</span></td>
+                  </tr>
+                  <tr>
+                    <td>Owned symlink with absolute or non-canonical target text</td>
+                    <td>Yes</td>
+                    <td><span class="tag amber">Replace</span></td>
+                  </tr>
+                  <tr>
+                    <td>Owned symlink no longer desired</td>
+                    <td>No</td>
+                    <td><span class="tag amber">Remove as stale</span></td>
+                  </tr>
+                  <tr>
+                    <td>User-managed symlink pointing outside <code>blobs/</code></td>
+                    <td>No</td>
+                    <td><span class="tag">Leave alone</span></td>
+                  </tr>
+                  <tr>
+                    <td>User-managed symlink pointing outside <code>blobs/</code></td>
+                    <td>Yes</td>
+                    <td><span class="tag red">Block and fail</span></td>
+                  </tr>
+                  <tr>
+                    <td>Non-symlink file</td>
+                    <td>Yes</td>
+                    <td><span class="tag red">Block and fail</span></td>
+                  </tr>
+                  <tr>
+                    <td>Non-symlink file</td>
+                    <td>No</td>
+                    <td><span class="tag">Leave alone</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p>
+              Ownership is lexical and does not require the target to exist. That lets the command
+              remove dangling stale links that still clearly point into this store. It also means
+              ownership checks do not resolve symlinks or traverse the filesystem target.
+            </p>
+          </section>
+
+          <section id="planning">
+            <div class="section-kicker">Functional core, imperative shell</div>
+            <h2>Known errors are found before the first mutation.</h2>
+            <p class="section-intro">
+              <code>build_tree</code> first creates a complete <code>Plan</code>. A real run applies
+              it; a dry-run returns its report. The plan contains desired links, stale owned links,
+              directories to create, directories to prune, and all counters.
+            </p>
+
+            <ol class="sequence">
+              <li><strong>Open the catalog read-only.</strong> Missing, uninitialized, or newer schemas fail.</li>
+              <li><strong>Load and validate live entries.</strong> Persisted paths and hashes become validated types.</li>
+              <li><strong>Derive desired outputs.</strong> Transform final filenames and compute relative target text.</li>
+              <li><strong>Validate every CAS target.</strong> It must be a regular file with the cataloged size.</li>
+              <li><strong>Detect output collisions.</strong> No ambiguous short-hash name can enter the plan.</li>
+              <li><strong>Walk existing browse state.</strong> Classify owned links and desired-path blockers.</li>
+              <li><strong>Compute reconciliation.</strong> Count create, unchanged, replace, and stale removal actions.</li>
+              <li><strong>Validate parent directories.</strong> Existing symlinked or non-directory parents block.</li>
+              <li><strong>Simulate pruning.</strong> Count empty directories after stale links and child dirs disappear.</li>
+              <li><strong>Apply only for a real run.</strong> Dry-run stops here with the completed report.</li>
+            </ol>
+
+            <div class="grid-2">
+              <article class="concept">
+                <h3>Why desired links come first</h3>
+                <p>
+                  During apply, desired links are created or replaced before stale cleanup. A link
+                  that remains desired is never deliberately removed first.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>Why replacement uses rename</h3>
+                <p>
+                  A replacement target is first created as a temporary symlink in the same
+                  directory, then renamed over the old owned link. This avoids a normal replacement
+                  window with no link at all.
+                </p>
+              </article>
+            </div>
+
+            <div class="callout warning">
+              <h3>No rollback</h3>
+              <p>
+                Planning catches known problems before mutation, but unexpected apply-time I/O
+                failures abort immediately without rolling back earlier actions. Stale cleanup only
+                starts after all desired link operations succeed. A later rerun can reconcile
+                partial generated state.
+              </p>
+            </div>
+          </section>
+
+          <section id="filesystem">
+            <div class="section-kicker">Mutation boundaries</div>
+            <h2>The command mutates only the generated presentation tree.</h2>
+
+            <div class="grid-3">
+              <article class="concept">
+                <span class="tag">May create</span>
+                <h3>Browse directories</h3>
+                <p>
+                  The final browse root, when missing, and real child directories required by
+                  desired links.
+                </p>
+              </article>
+              <article class="concept">
+                <span class="tag amber">May replace</span>
+                <h3>Owned symlinks</h3>
+                <p>
+                  Only links whose normalized target points into the configured
+                  <code>blobs/</code> tree.
+                </p>
+              </article>
+              <article class="concept">
+                <span class="tag amber">May remove</span>
+                <h3>Stale owned links</h3>
+                <p>
+                  Plus empty child directories after cleanup. The browse root itself is never
+                  pruned.
+                </p>
+              </article>
+            </div>
+
+            <div class="grid-3">
+              <article class="concept">
+                <span class="tag red">Never mutate</span>
+                <h3>Catalog</h3>
+                <p>SQLite is opened read-only and no migrations are run.</p>
+              </article>
+              <article class="concept">
+                <span class="tag red">Never mutate</span>
+                <h3>CAS blobs</h3>
+                <p>Blob files are validated as link targets, not changed.</p>
+              </article>
+              <article class="concept">
+                <span class="tag red">Never overwrite</span>
+                <h3>User entries</h3>
+                <p>Non-symlinks and externally pointing symlinks are preserved or treated as blockers.</p>
+              </article>
+            </div>
+
+            <h3>Directory pruning is bottom-up</h3>
+            <p>
+              Candidate ancestors of stale owned links are considered deepest first. The planner
+              accounts for already-prunable child directories, while the apply phase uses
+              <code>remove_dir</code>, which succeeds only for an actually empty directory.
+            </p>
+          </section>
+
+          <section id="architecture">
+            <div class="section-kicker">Code map</div>
+            <h2>The implementation follows the repository's responsibility boundaries.</h2>
+            <p>
+              Commit <code>10b1566</code> changed nine files. Two were new: the materialization
+              module and its catalog query.
+            </p>
+
+            <ul class="file-list">
+              <li>
+                <a href="../../crates/media-importer/src/materialize.rs">src/materialize.rs</a>
+                <span>
+                  Owns planning, CAS target checks, browse-tree walking, link classification,
+                  mutation, stale cleanup, pruning, and report counters.
+                </span>
+              </li>
+              <li>
+                <a href="../../crates/media-importer/src/paths.rs">src/paths.rs</a>
+                <span>
+                  Adds strict build-tree root validation, <code>BrowseTreeRoot</code>, persisted path
+                  validation, naming, lexical normalization, ownership, and relative-link helpers.
+                </span>
+              </li>
+              <li>
+                <a href="../../crates/media-importer/src/catalog.rs">src/catalog.rs</a>
+                <span>
+                  Adds the exact-schema read-only opener, typed
+                  <code>LiveMaterializationEntry</code>, and behavior-level live entry query.
+                </span>
+              </li>
+              <li>
+                <a href="../../crates/media-importer/src/catalog/sql/select_live_materialization_entries.sql">catalog/sql/select_live_materialization_entries.sql</a>
+                <span>Contains the live, grouped, deterministic projection query.</span>
+              </li>
+              <li>
+                <a href="../../crates/media-importer/src/config.rs">src/config.rs</a>
+                <span>
+                  Keeps raw <code>BuildTreeOptions</code> separate from validated
+                  <code>BuildTreeConfig</code> and applies command-level invariants.
+                </span>
+              </li>
+              <li>
+                <a href="../../crates/media-importer/src/cli.rs">src/cli.rs</a>
+                <span>Adds clap arguments, dispatch conversion, and real/dry-run summary rendering.</span>
+              </li>
+              <li>
+                <a href="../../crates/media-importer/src/main.rs">src/main.rs</a>
+                <span>Dispatches the validated command to the deep <code>build_tree</code> operation.</span>
+              </li>
+              <li>
+                <a href="../../crates/media-importer/src/lib.rs">src/lib.rs</a>
+                <span>Exports the new materialization module.</span>
+              </li>
+              <li>
+                <a href="../../crates/media-importer/tests/import_milestone.rs">tests/import_milestone.rs</a>
+                <span>Adds end-to-end build-tree behavior tests while retaining import coverage.</span>
+              </li>
+            </ul>
+
+            <div class="callout">
+              <h3>The deep interface</h3>
+              <p>
+                Callers ask for <code>build_tree(config) -&gt; Result&lt;BuildTreeReport&gt;</code>.
+                They do not perform SQL, construct blob paths, walk the filesystem, or choreograph
+                cleanup themselves.
+              </p>
+            </div>
+          </section>
+
+          <section id="testing">
+            <div class="section-kicker">Behavioral evidence</div>
+            <h2>Tests use real tiny catalogs, stores, files, and Unix symlinks.</h2>
+            <p class="section-intro">
+              The change grew the integration suite from the milestone 1 import cases to cover the
+              critical build-tree workflows, while pure helpers received focused unit tests.
+            </p>
+
+            <div class="grid-2">
+              <article class="concept">
+                <h3>End-to-end creation</h3>
+                <p>
+                  Imports fixtures, builds the tree, checks relative link targets, verifies normal
+                  extensions, dotfiles and extensionless names, then reruns and observes unchanged
+                  links.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>Dry-run</h3>
+                <p>
+                  Confirms planned create counts are reported while the missing browse root remains
+                  absent.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>Input failures</h3>
+                <p>
+                  Covers missing catalog, database inside browse tree, and a CAS canonical path that
+                  is itself a symlink.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>Ownership and cleanup</h3>
+                <p>
+                  Covers stale owned link removal, preservation of non-empty directories,
+                  replacement of owned absolute links, and preservation of external user links.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>Pure naming</h3>
+                <p>
+                  Exercises final extensions, multiple dots, extensionless files, dotfiles, Unicode,
+                  and configurable prefix lengths.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>Pure path logic</h3>
+                <p>
+                  Exercises same-directory, parent, nested and sibling relative targets, plus
+                  rejection of unsafe catalog path forms.
+                </p>
+              </article>
+            </div>
+
+            <div class="callout warning">
+              <h3>How to interpret the test count</h3>
+              <p>
+                The implementation commit left 14 integration tests in
+                <code>import_milestone.rs</code>: 8 existing import cases and 6 additional
+                build-tree-focused scenarios, with several assertions per scenario. It also added
+                path unit tests and one focused apply-time non-symlink defense test.
+              </p>
+            </div>
+          </section>
+
+          <section id="limits">
+            <div class="section-kicker">Boundaries and implications</div>
+            <h2>What this milestone deliberately does not promise.</h2>
+
+            <div class="grid-2">
+              <article class="concept">
+                <h3>No repair</h3>
+                <p>
+                  Missing or size-mismatched CAS blobs cause failure. Build-tree does not restore,
+                  rehash, or rewrite content.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>No rollback transaction</h3>
+                <p>
+                  Filesystem apply is ordered defensively but is not transactional. Unexpected I/O
+                  failure may leave partially applied generated state.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>No content rehash</h3>
+                <p>
+                  CAS target validation checks entry type and cataloged size. Full content integrity
+                  verification belongs to a later audit capability.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>No Windows target</h3>
+                <p>
+                  The command creates Unix symlinks and the project explicitly targets Linux and
+                  macOS.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>No metadata filtering</h3>
+                <p>
+                  All live catalog entries are projected. There is no MIME or media-extension
+                  selection in this milestone.
+                </p>
+              </article>
+              <article class="concept">
+                <h3>No catalog mutation</h3>
+                <p>
+                  Materialization does not record runs, ownership, or generated paths in SQLite.
+                  Ownership is inferred from symlink targets each time.
+                </p>
+              </article>
+            </div>
+
+            <h3>Useful invariants to carry forward</h3>
+            <ul>
+              <li>The CAS and catalog are durable truth; presentation trees are rebuildable.</li>
+              <li>Persisted relative paths are revalidated at every filesystem join boundary.</li>
+              <li>Dry-run and real execution share planning logic.</li>
+              <li>Only owned symlinks may be replaced or deleted.</li>
+              <li>Known blockers and corrupt targets are detected before mutation.</li>
+              <li>Raw SQL remains owned by the catalog module.</li>
+            </ul>
+          </section>
+
+          <section id="quiz">
+            <div class="section-kicker">Required knowledge check</div>
+            <h2>You must pass the Milestone 2 quiz.</h2>
+            <div class="quiz-intro">
+              <p>
+                Answer all 12 questions, then grade the quiz. A pass requires at least 10 correct
+                answers. After grading, every question reveals an explanation so you can review and
+                retry.
+              </p>
+              <div class="pass-mark">Pass: 10 / 12</div>
+            </div>
+
+            <form id="quiz-form">
+              <fieldset class="question" data-answer="b" tabindex="-1">
+                <legend>1. Which state is authoritative after Milestone 2?</legend>
+                <label class="option"><input type="radio" name="q1" value="a" /> The browse tree, because users see it.</label>
+                <label class="option"><input type="radio" name="q1" value="b" /> The catalog and CAS; the browse tree is a derived projection.</label>
+                <label class="option"><input type="radio" name="q1" value="c" /> The original source filesystem only.</label>
+                <p class="explanation">
+                  The browse tree is disposable generated state. Catalog rows describe desired
+                  identity and CAS files hold the durable bytes.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="c" tabindex="-1">
+                <legend>2. What does <code>--dry-run</code> skip?</legend>
+                <label class="option"><input type="radio" name="q2" value="a" /> Catalog reads and CAS validation.</label>
+                <label class="option"><input type="radio" name="q2" value="b" /> Collision and blocker detection.</label>
+                <label class="option"><input type="radio" name="q2" value="c" /> Only the apply phase that mutates the browse tree.</label>
+                <p class="explanation">
+                  Dry-run uses the real planner, including validation and diffing, then returns the
+                  plan report without applying it.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="a" tabindex="-1">
+                <legend>3. How is <code>archive.tar.gz</code> named with prefix <code>abc123</code>?</legend>
+                <label class="option"><input type="radio" name="q3" value="a" /> <code>archive.tar_abc123.gz</code></label>
+                <label class="option"><input type="radio" name="q3" value="b" /> <code>archive_abc123.tar.gz</code></label>
+                <label class="option"><input type="radio" name="q3" value="c" /> <code>archive.tar.gz_abc123</code></label>
+                <p class="explanation">
+                  Only the final extension is preserved as the extension. The suffix is inserted
+                  before <code>.gz</code>.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="b" tabindex="-1">
+                <legend>4. What makes a symlink "owned" by this command?</legend>
+                <label class="option"><input type="radio" name="q4" value="a" /> Its filename contains a six-digit hash suffix.</label>
+                <label class="option"><input type="radio" name="q4" value="b" /> It is under the browse root and its lexically normalized target points inside this store's <code>blobs/</code>.</label>
+                <label class="option"><input type="radio" name="q4" value="c" /> It was created during the current process.</label>
+                <p class="explanation">
+                  Ownership is target-based, not name-based or process-memory-based. That allows
+                  stale links from previous hash-digit settings to be recognized.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="c" tabindex="-1">
+                <legend>5. An existing desired symlink resolves to the right blob but stores an absolute target. What happens?</legend>
+                <label class="option"><input type="radio" name="q5" value="a" /> It is unchanged because resolution is all that matters.</label>
+                <label class="option"><input type="radio" name="q5" value="b" /> The command fails because absolute symlinks are never owned.</label>
+                <label class="option"><input type="radio" name="q5" value="c" /> It is replaced with the canonical relative target text.</label>
+                <p class="explanation">
+                  "Unchanged" requires exact expected target text. An owned absolute or
+                  non-canonical target is replaced.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="a" tabindex="-1">
+                <legend>6. Which catalog rows become desired links?</legend>
+                <label class="option"><input type="radio" name="q6" value="a" /> Grouped source path and hash pairs joined to blobs whose <code>deleted_at_ms</code> is null.</label>
+                <label class="option"><input type="radio" name="q6" value="b" /> Only rows with recognized media extensions.</label>
+                <label class="option"><input type="radio" name="q6" value="c" /> Every blob row, including logically deleted blobs.</label>
+                <p class="explanation">
+                  The SQL includes all live entries, deliberately dedupes by relative path and full
+                  hash, and performs no MIME or extension filtering.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="b" tabindex="-1">
+                <legend>7. What does CAS target validation prove before linking?</legend>
+                <label class="option"><input type="radio" name="q7" value="a" /> Only that some filesystem entry exists at the path.</label>
+                <label class="option"><input type="radio" name="q7" value="b" /> The target is a regular file and its size matches the catalog.</label>
+                <label class="option"><input type="radio" name="q7" value="c" /> The target's full content hash is recomputed.</label>
+                <p class="explanation">
+                  Milestone 2 checks entry type and size. Full content hashing is not part of
+                  build-tree.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="c" tabindex="-1">
+                <legend>8. A user-managed symlink points outside the CAS and occupies a desired output path. What happens?</legend>
+                <label class="option"><input type="radio" name="q8" value="a" /> It is silently replaced.</label>
+                <label class="option"><input type="radio" name="q8" value="b" /> It is ignored and the desired link is omitted.</label>
+                <label class="option"><input type="radio" name="q8" value="c" /> It is a blocker and planning fails before mutation.</label>
+                <p class="explanation">
+                  The command never replaces a symlink it does not own. At a desired path, that
+                  means it must fail rather than lose user state.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="a" tabindex="-1">
+                <legend>9. Why can a short hash-prefix collision not be resolved by picking one row?</legend>
+                <label class="option"><input type="radio" name="q9" value="a" /> Both entries claim the same browse path, so silently choosing would hide desired content.</label>
+                <label class="option"><input type="radio" name="q9" value="b" /> SQLite cannot order hash strings.</label>
+                <label class="option"><input type="radio" name="q9" value="c" /> BLAKE3 hashes are not stable.</label>
+                <p class="explanation">
+                  The presentation identity is ambiguous at that prefix length. The safe response is
+                  to fail before mutation and ask for more hash digits.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="b" tabindex="-1">
+                <legend>10. In what order does the real apply phase reconcile links?</legend>
+                <label class="option"><input type="radio" name="q10" value="a" /> Remove all old links, prune, then create desired links.</label>
+                <label class="option"><input type="radio" name="q10" value="b" /> Create directories, create or replace desired links, remove stale owned links, then prune empty directories.</label>
+                <label class="option"><input type="radio" name="q10" value="c" /> Update SQLite first, then mirror its transaction log.</label>
+                <p class="explanation">
+                  Desired links are applied before stale cleanup. Pruning happens last and never
+                  removes the browse root.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="c" tabindex="-1">
+                <legend>11. What schema behavior does the materialization catalog opener use?</legend>
+                <label class="option"><input type="radio" name="q11" value="a" /> Writable open with automatic migration.</label>
+                <label class="option"><input type="radio" name="q11" value="b" /> Missing databases are treated as empty catalogs.</label>
+                <label class="option"><input type="radio" name="q11" value="c" /> Read-only open requiring exactly schema version 1.</label>
+                <p class="explanation">
+                  Build-tree neither creates nor migrates the catalog. Missing, uninitialized, and
+                  newer schemas fail clearly.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="a" tabindex="-1">
+                <legend>12. What happens if an unexpected I/O failure occurs halfway through apply?</legend>
+                <label class="option"><input type="radio" name="q12" value="a" /> The command aborts without rolling back filesystem work already completed.</label>
+                <label class="option"><input type="radio" name="q12" value="b" /> SQLite rolls the filesystem back automatically.</label>
+                <label class="option"><input type="radio" name="q12" value="c" /> The error is ignored so cleanup can continue.</label>
+                <p class="explanation">
+                  Apply is not transactional. It aborts on the first error. Stale cleanup does not
+                  begin unless all desired-link operations succeeded.
+                </p>
+              </fieldset>
+
+              <div class="quiz-actions">
+                <button class="button" type="submit">Grade my answers</button>
+                <button class="button secondary" type="button" id="reset-quiz">Reset quiz</button>
+                <span class="small" id="answered-count" aria-live="polite">0 of 12 answered</span>
+              </div>
+              <div id="quiz-result" class="quiz-result" role="status" aria-live="polite"></div>
+            </form>
+          </section>
+        </main>
+      </div>
+
+      <footer class="footer">
+        Media Importer / Milestone 2 browse-tree materialization / implementation snapshot
+        <code>10b1566</code>
+      </footer>
+    </div>
+
+    <script>
+      (() => {
+        const progress = document.getElementById("scroll-progress");
+        const tocLinks = [...document.querySelectorAll(".toc a")];
+        const sections = tocLinks
+          .map((link) => document.querySelector(link.getAttribute("href")))
+          .filter(Boolean);
+
+        const updateScroll = () => {
+          const scrollable = document.documentElement.scrollHeight - window.innerHeight;
+          const ratio = scrollable > 0 ? window.scrollY / scrollable : 0;
+          progress.style.width = `${Math.min(100, Math.max(0, ratio * 100))}%`;
+
+          let active = sections[0];
+          for (const section of sections) {
+            if (section.getBoundingClientRect().top <= 140) active = section;
+          }
+          tocLinks.forEach((link) => {
+            link.classList.toggle("active", link.getAttribute("href") === `#${active?.id}`);
+          });
+        };
+
+        window.addEventListener("scroll", updateScroll, { passive: true });
+        updateScroll();
+
+        const form = document.getElementById("quiz-form");
+        const questions = [...form.querySelectorAll(".question")];
+        const result = document.getElementById("quiz-result");
+        const answeredCount = document.getElementById("answered-count");
+        const resetButton = document.getElementById("reset-quiz");
+        const passScore = 10;
+
+        const updateAnswered = () => {
+          const answered = questions.filter((question) =>
+            question.querySelector("input:checked"),
+          ).length;
+          answeredCount.textContent = `${answered} of ${questions.length} answered`;
+        };
+
+        form.addEventListener("change", updateAnswered);
+
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          let score = 0;
+          let firstIncorrect = null;
+
+          questions.forEach((question) => {
+            const selected = question.querySelector("input:checked");
+            const correct = selected?.value === question.dataset.answer;
+            question.classList.add("graded");
+            question.classList.toggle("correct", correct);
+            question.classList.toggle("incorrect", !correct);
+            if (correct) {
+              score += 1;
+            } else if (!firstIncorrect) {
+              firstIncorrect = question;
+            }
+          });
+
+          const passed = score >= passScore;
+          result.className = `quiz-result ${passed ? "pass" : "fail"}`;
+          result.textContent = passed
+            ? `Passed: ${score}/${questions.length}. You have a working understanding of the Milestone 2 contract and implementation.`
+            : `Not yet: ${score}/${questions.length}. You need ${passScore}/${questions.length} to pass. Review the explanations on the marked questions and try again.`;
+          result.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+          if (!passed && firstIncorrect) {
+            setTimeout(() => firstIncorrect.focus({ preventScroll: true }), 350);
+          }
+        });
+
+        resetButton.addEventListener("click", () => {
+          form.reset();
+          questions.forEach((question) => {
+            question.classList.remove("graded", "correct", "incorrect");
+          });
+          result.className = "quiz-result";
+          result.textContent = "";
+          updateAnswered();
+          questions[0].scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+      })();
+    </script>
+  </body>
+</html>

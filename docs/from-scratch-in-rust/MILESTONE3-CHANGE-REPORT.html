@@ -1,0 +1,1908 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="A detailed change report and knowledge check for Media Importer Milestone 3 integrity auditing."
+    />
+    <title>Media Importer — Milestone 3 Change Report</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #17242d;
+        --muted: #5f6c73;
+        --paper: #f5f3ec;
+        --surface: #fffdf8;
+        --surface-strong: #ffffff;
+        --line: #d9d5ca;
+        --navy: #17364a;
+        --teal: #147a78;
+        --teal-soft: #e5f3f0;
+        --amber: #b96c27;
+        --amber-soft: #fff0dd;
+        --red: #a44640;
+        --red-soft: #fbeae7;
+        --green: #397149;
+        --green-soft: #e9f4eb;
+        --purple: #68548e;
+        --purple-soft: #efebf8;
+        --blue-soft: #e8f0f7;
+        --shadow: 0 18px 50px rgba(31, 44, 51, 0.09);
+        --radius: 16px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 8% 2%, rgba(20, 122, 120, 0.11), transparent 29rem),
+          radial-gradient(circle at 94% 12%, rgba(185, 108, 39, 0.1), transparent 32rem),
+          linear-gradient(180deg, #fbfaf5, var(--paper));
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        line-height: 1.65;
+      }
+
+      a {
+        color: var(--teal);
+        text-underline-offset: 3px;
+      }
+
+      a:hover {
+        color: #0f5e5c;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      .scroll-progress {
+        position: fixed;
+        z-index: 100;
+        top: 0;
+        left: 0;
+        width: 0;
+        height: 4px;
+        background: linear-gradient(90deg, var(--teal), var(--amber));
+      }
+
+      .page {
+        width: min(1280px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 44px 0 80px;
+      }
+
+      .hero {
+        position: relative;
+        display: grid;
+        grid-template-columns: minmax(0, 1.55fr) minmax(290px, 0.7fr);
+        gap: 34px;
+        align-items: end;
+        overflow: hidden;
+        padding: clamp(28px, 5vw, 64px);
+        border: 1px solid rgba(23, 54, 74, 0.16);
+        border-radius: 24px;
+        background:
+          linear-gradient(135deg, rgba(255, 255, 255, 0.95), rgba(247, 248, 241, 0.9)),
+          var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      .hero::after {
+        position: absolute;
+        top: -80px;
+        right: -60px;
+        width: 270px;
+        height: 270px;
+        border: 42px solid rgba(20, 122, 120, 0.08);
+        border-radius: 50%;
+        content: "";
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        gap: 9px;
+        align-items: center;
+        margin-bottom: 18px;
+        color: var(--teal);
+        font-size: 0.78rem;
+        font-weight: 850;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow::before {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--teal);
+        box-shadow: 0 0 0 5px rgba(20, 122, 120, 0.12);
+        content: "";
+      }
+
+      h1,
+      h2,
+      h3,
+      h4,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 850px;
+        margin-bottom: 18px;
+        color: var(--navy);
+        font-size: clamp(2.55rem, 6vw, 5.5rem);
+        line-height: 0.97;
+        letter-spacing: -0.045em;
+      }
+
+      h2 {
+        margin-bottom: 14px;
+        color: var(--navy);
+        font-size: clamp(1.7rem, 3vw, 2.65rem);
+        line-height: 1.08;
+        letter-spacing: -0.025em;
+      }
+
+      h3 {
+        margin-bottom: 8px;
+        color: var(--navy);
+        font-size: 1.12rem;
+        line-height: 1.3;
+      }
+
+      h4 {
+        margin-bottom: 6px;
+        color: var(--navy);
+        font-size: 0.95rem;
+      }
+
+      p,
+      li {
+        color: var(--muted);
+      }
+
+      code,
+      pre,
+      .mono {
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      code {
+        padding: 0.12em 0.34em;
+        border: 1px solid #d9dedf;
+        border-radius: 5px;
+        background: #f5f7f6;
+        color: #24434f;
+        font-size: 0.9em;
+      }
+
+      pre {
+        overflow-x: auto;
+        margin: 16px 0 0;
+        padding: 18px;
+        border: 1px solid #253f50;
+        border-radius: 12px;
+        background: #132b3a;
+        color: #eaf5f3;
+        font-size: 0.84rem;
+        line-height: 1.6;
+      }
+
+      pre code {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+      }
+
+      .lead {
+        max-width: 810px;
+        margin-bottom: 0;
+        color: #40535e;
+        font-size: clamp(1.04rem, 1.8vw, 1.28rem);
+      }
+
+      .hero-aside {
+        position: relative;
+        z-index: 1;
+        padding: 22px;
+        border: 1px solid rgba(23, 54, 74, 0.12);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.82);
+      }
+
+      .hero-aside strong {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--navy);
+        font-size: 1.05rem;
+      }
+
+      .hero-aside p {
+        margin-bottom: 12px;
+        font-size: 0.92rem;
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 30px;
+        padding: 5px 10px;
+        border: 1px solid #cbded9;
+        border-radius: 999px;
+        background: var(--teal-soft);
+        color: #195f5d;
+        font-size: 0.76rem;
+        font-weight: 750;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 248px minmax(0, 1fr);
+        gap: 32px;
+        align-items: start;
+        margin-top: 34px;
+      }
+
+      .toc {
+        position: sticky;
+        top: 24px;
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(255, 253, 248, 0.9);
+        box-shadow: 0 8px 28px rgba(31, 44, 51, 0.05);
+        backdrop-filter: blur(10px);
+      }
+
+      .toc strong {
+        display: block;
+        margin-bottom: 10px;
+        color: var(--navy);
+        font-size: 0.82rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .toc a {
+        display: block;
+        padding: 7px 0;
+        border-bottom: 1px solid #ebe7dd;
+        color: #53646d;
+        font-size: 0.84rem;
+        text-decoration: none;
+      }
+
+      .toc a:last-child {
+        border-bottom: 0;
+      }
+
+      .toc a:hover,
+      .toc a.active {
+        color: var(--teal);
+        font-weight: 750;
+      }
+
+      main {
+        min-width: 0;
+      }
+
+      section {
+        scroll-margin-top: 24px;
+        margin-bottom: 28px;
+        padding: clamp(24px, 4vw, 42px);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: rgba(255, 253, 248, 0.92);
+        box-shadow: 0 9px 30px rgba(31, 44, 51, 0.045);
+      }
+
+      .section-kicker {
+        margin-bottom: 7px;
+        color: var(--teal);
+        font-size: 0.75rem;
+        font-weight: 850;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .callout {
+        margin: 20px 0;
+        padding: 18px 20px;
+        border-left: 4px solid var(--teal);
+        border-radius: 0 12px 12px 0;
+        background: var(--teal-soft);
+      }
+
+      .callout.warning {
+        border-left-color: var(--amber);
+        background: var(--amber-soft);
+      }
+
+      .callout.history {
+        border-left-color: var(--purple);
+        background: var(--purple-soft);
+      }
+
+      .callout strong {
+        color: var(--navy);
+      }
+
+      .callout p:last-child {
+        margin-bottom: 0;
+      }
+
+      .grid-2,
+      .grid-3,
+      .grid-4 {
+        display: grid;
+        gap: 16px;
+        margin-top: 20px;
+      }
+
+      .grid-2 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .grid-3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .grid-4 {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .card {
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        background: var(--surface-strong);
+      }
+
+      .card p:last-child,
+      .card ul:last-child {
+        margin-bottom: 0;
+      }
+
+      .card .number {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--teal);
+        font-size: 1.65rem;
+        font-weight: 850;
+        line-height: 1;
+      }
+
+      .metric {
+        text-align: center;
+      }
+
+      .metric strong {
+        display: block;
+        color: var(--navy);
+        font-size: 1.8rem;
+        line-height: 1.1;
+      }
+
+      .metric span {
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(120px, 1fr));
+        gap: 10px;
+        align-items: stretch;
+        margin: 24px 0;
+      }
+
+      .flow-step {
+        position: relative;
+        display: flex;
+        min-height: 118px;
+        flex-direction: column;
+        justify-content: center;
+        padding: 15px;
+        border: 1px solid #c9d9d7;
+        border-radius: 12px;
+        background: linear-gradient(180deg, #ffffff, #edf7f5);
+        text-align: center;
+      }
+
+      .flow-step:not(:last-child)::after {
+        position: absolute;
+        z-index: 2;
+        top: 50%;
+        right: -13px;
+        color: var(--teal);
+        content: "→";
+        font-size: 1.15rem;
+        font-weight: 900;
+        transform: translateY(-50%);
+      }
+
+      .flow-step strong {
+        color: var(--navy);
+        font-size: 0.88rem;
+      }
+
+      .flow-step span {
+        margin-top: 5px;
+        color: var(--muted);
+        font-size: 0.74rem;
+      }
+
+      .ledger-diagram {
+        display: grid;
+        grid-template-columns: 1fr 100px 1fr;
+        gap: 18px;
+        align-items: center;
+        margin: 24px 0;
+      }
+
+      .ledger-box {
+        min-height: 190px;
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: white;
+      }
+
+      .ledger-box.catalog {
+        border-top: 5px solid var(--purple);
+      }
+
+      .ledger-box.cas {
+        border-top: 5px solid var(--teal);
+      }
+
+      .ledger-box ul {
+        margin-bottom: 0;
+        padding-left: 20px;
+      }
+
+      .reconcile {
+        display: grid;
+        place-items: center;
+        width: 86px;
+        height: 86px;
+        border: 2px solid var(--amber);
+        border-radius: 50%;
+        background: var(--amber-soft);
+        color: #835022;
+        font-size: 0.72rem;
+        font-weight: 850;
+        text-align: center;
+        text-transform: uppercase;
+      }
+
+      .table-wrap {
+        overflow-x: auto;
+        margin-top: 18px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        background: white;
+        font-size: 0.88rem;
+      }
+
+      th,
+      td {
+        padding: 12px 14px;
+        border-bottom: 1px solid #e8e4dc;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        background: #f3f5f3;
+        color: var(--navy);
+        font-size: 0.74rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .status {
+        display: inline-flex;
+        padding: 3px 8px;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        font-weight: 800;
+      }
+
+      .status.clean {
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .status.finding {
+        background: var(--amber-soft);
+        color: #8a5220;
+      }
+
+      .status.error {
+        background: var(--red-soft);
+        color: var(--red);
+      }
+
+      .tree {
+        margin: 18px 0 0;
+        padding: 18px;
+        border: 1px solid #d7ddd9;
+        border-radius: 12px;
+        background: #f7f9f7;
+        color: #3e525d;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 0.84rem;
+        line-height: 1.75;
+        white-space: pre-wrap;
+      }
+
+      .finding-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 9px;
+        margin-top: 18px;
+      }
+
+      .finding {
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+        padding: 10px 12px;
+        border: 1px solid #e1ddd4;
+        border-radius: 9px;
+        background: white;
+      }
+
+      .finding code {
+        flex: 0 0 auto;
+        color: var(--red);
+        font-size: 0.75rem;
+        font-weight: 800;
+      }
+
+      .finding span {
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+
+      .timeline {
+        position: relative;
+        margin-top: 22px;
+        padding-left: 25px;
+      }
+
+      .timeline::before {
+        position: absolute;
+        top: 5px;
+        bottom: 5px;
+        left: 7px;
+        width: 2px;
+        background: #cbd9d6;
+        content: "";
+      }
+
+      .timeline-item {
+        position: relative;
+        margin-bottom: 20px;
+      }
+
+      .timeline-item::before {
+        position: absolute;
+        top: 6px;
+        left: -23px;
+        width: 11px;
+        height: 11px;
+        border: 3px solid var(--surface);
+        border-radius: 50%;
+        background: var(--teal);
+        box-shadow: 0 0 0 2px var(--teal);
+        content: "";
+      }
+
+      .timeline-item p {
+        margin-bottom: 0;
+      }
+
+      details {
+        margin-top: 12px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: white;
+      }
+
+      summary {
+        cursor: pointer;
+        padding: 13px 15px;
+        color: var(--navy);
+        font-weight: 750;
+      }
+
+      details > div {
+        padding: 0 15px 15px;
+      }
+
+      .quiz-intro {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 20px;
+        align-items: center;
+        margin-bottom: 22px;
+        padding: 18px;
+        border: 1px solid #c9d9d7;
+        border-radius: 12px;
+        background: var(--teal-soft);
+      }
+
+      .quiz-intro p {
+        margin-bottom: 0;
+      }
+
+      .pass-mark {
+        min-width: 112px;
+        padding: 12px;
+        border-radius: 10px;
+        background: white;
+        color: var(--teal);
+        font-size: 1.28rem;
+        font-weight: 900;
+        text-align: center;
+      }
+
+      .question {
+        margin-bottom: 18px;
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: 13px;
+        background: white;
+      }
+
+      .question.correct {
+        border-color: #87b596;
+        box-shadow: inset 4px 0 0 var(--green);
+      }
+
+      .question.incorrect {
+        border-color: #d49a95;
+        box-shadow: inset 4px 0 0 var(--red);
+      }
+
+      .question legend {
+        width: 100%;
+        margin-bottom: 12px;
+        padding: 0;
+        color: var(--navy);
+        font-weight: 800;
+      }
+
+      .option {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        margin: 8px 0;
+        padding: 9px 10px;
+        border-radius: 8px;
+        color: #53646d;
+        cursor: pointer;
+      }
+
+      .option:hover {
+        background: #f4f7f5;
+      }
+
+      .option input {
+        margin-top: 5px;
+        accent-color: var(--teal);
+      }
+
+      .explanation {
+        display: none;
+        margin: 12px 0 0;
+        padding: 11px 13px;
+        border-radius: 8px;
+        background: #f3f5f4;
+        color: #4d5f68;
+        font-size: 0.84rem;
+      }
+
+      .question.graded .explanation {
+        display: block;
+      }
+
+      .quiz-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .button {
+        min-height: 44px;
+        padding: 10px 18px;
+        border: 0;
+        border-radius: 9px;
+        background: var(--teal);
+        color: white;
+        font-weight: 800;
+        cursor: pointer;
+      }
+
+      .button:hover {
+        background: #0f6563;
+      }
+
+      .button.secondary {
+        border: 1px solid #b9c8c5;
+        background: white;
+        color: var(--navy);
+      }
+
+      .quiz-result {
+        display: none;
+        margin-top: 18px;
+        padding: 20px;
+        border-radius: 12px;
+        font-weight: 750;
+      }
+
+      .quiz-result.pass {
+        display: block;
+        border: 1px solid #8dbb9a;
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .quiz-result.fail {
+        display: block;
+        border: 1px solid #d49a95;
+        background: var(--red-soft);
+        color: var(--red);
+      }
+
+      .small {
+        font-size: 0.82rem;
+      }
+
+      .footer {
+        padding: 24px 0 0;
+        color: #6b767a;
+        font-size: 0.8rem;
+        text-align: center;
+      }
+
+      @media (max-width: 1040px) {
+        .layout {
+          grid-template-columns: 1fr;
+        }
+
+        .toc {
+          position: static;
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 0 14px;
+        }
+
+        .toc strong {
+          grid-column: 1 / -1;
+        }
+
+        .flow {
+          grid-template-columns: 1fr;
+        }
+
+        .flow-step {
+          min-height: auto;
+        }
+
+        .flow-step:not(:last-child)::after {
+          top: auto;
+          right: 50%;
+          bottom: -17px;
+          transform: translateX(50%) rotate(90deg);
+        }
+
+        .grid-4 {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 760px) {
+        .page {
+          width: min(100% - 18px, 1280px);
+          padding-top: 16px;
+        }
+
+        .hero,
+        .grid-2,
+        .grid-3,
+        .ledger-diagram,
+        .quiz-intro {
+          grid-template-columns: 1fr;
+        }
+
+        .hero {
+          gap: 22px;
+        }
+
+        .reconcile {
+          margin: 0 auto;
+        }
+
+        .finding-list,
+        .grid-4 {
+          grid-template-columns: 1fr;
+        }
+
+        .toc {
+          grid-template-columns: repeat(2, 1fr);
+        }
+      }
+
+      @media print {
+        body {
+          background: white;
+        }
+
+        .scroll-progress,
+        .toc,
+        .quiz-actions {
+          display: none;
+        }
+
+        .page {
+          width: 100%;
+          padding: 0;
+        }
+
+        .layout {
+          display: block;
+        }
+
+        section,
+        .hero {
+          break-inside: avoid;
+          box-shadow: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="scroll-progress" id="scroll-progress" aria-hidden="true"></div>
+    <div class="page">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Milestone 3 · Change report</div>
+          <h1>Trust, but verify every byte.</h1>
+          <p class="lead">
+            Milestone 3 added a read-only integrity audit that reconciles the SQLite catalog with
+            the content-addressed store, validates both sides independently, and reports every
+            inspectable problem without repairing anything.
+          </p>
+        </div>
+        <aside class="hero-aside">
+          <strong>Report scope</strong>
+          <p>
+            Implementation commit <code>b5ca5d8</code>, interpreted against the Milestone 3
+            contract and the review-driven corrections that landed with it.
+          </p>
+          <div class="chips">
+            <span class="chip">Read-only audit</span>
+            <span class="chip">BLAKE3 rehash</span>
+            <span class="chip">SQLite validation</span>
+            <span class="chip">Exit 0 / 1 / 2</span>
+          </div>
+        </aside>
+      </header>
+
+      <div class="layout">
+        <nav class="toc" aria-label="Report sections">
+          <strong>Contents</strong>
+          <a href="#orientation">1. Orientation</a>
+          <a href="#mental-model">2. Mental model</a>
+          <a href="#contract">3. User contract</a>
+          <a href="#pipeline">4. Audit pipeline</a>
+          <a href="#catalog">5. Catalog checks</a>
+          <a href="#cas">6. CAS checks</a>
+          <a href="#reconciliation">7. Reconciliation</a>
+          <a href="#safety">8. Safety &amp; resources</a>
+          <a href="#architecture">9. Code architecture</a>
+          <a href="#review">10. Review corrections</a>
+          <a href="#testing">11. Test strategy</a>
+          <a href="#limits">12. Limits</a>
+          <a href="#quiz">13. Required quiz</a>
+        </nav>
+
+        <main>
+          <section id="orientation">
+            <div class="section-kicker">Orientation</div>
+            <h2>What changed, in one sentence?</h2>
+            <p>
+              The application gained <code>media-importer audit</code>: a complete vertical slice
+              that validates the catalog, walks the strict CAS layout, hashes every canonical blob,
+              reconciles catalog and filesystem identities in both directions, renders
+              deterministic findings, and selects a meaningful process exit status.
+            </p>
+
+            <div class="grid-4">
+              <div class="card metric">
+                <strong>25</strong>
+                <span>files changed in the implementation commit</span>
+              </div>
+              <div class="card metric">
+                <strong>1,727</strong>
+                <span>insertions in the Milestone 3 commit</span>
+              </div>
+              <div class="card metric">
+                <strong>16</strong>
+                <span>audit integration tests after review expansion</span>
+              </div>
+              <div class="card metric">
+                <strong>3</strong>
+                <span>distinct exit outcomes</span>
+              </div>
+            </div>
+
+            <div class="callout history">
+              <strong>Historical boundary.</strong>
+              <p>
+                This report explains Milestone 3 as committed in <code>b5ca5d8</code>. The current
+                repository HEAD also contains Milestone 4, which later moved reusable CAS
+                inspection and finding machinery into shared <code>store</code> and
+                <code>integrity</code> modules. That later refactor does not change the Milestone 3
+                behavior explained here.
+              </p>
+            </div>
+
+            <h3>Before and after</h3>
+            <div class="grid-2">
+              <div class="card">
+                <span class="number">Before</span>
+                <p>
+                  Import could create catalog and CAS state, and build-tree could materialize a
+                  browse view. There was no command that independently proved the durable catalog
+                  still matched stored bytes.
+                </p>
+              </div>
+              <div class="card">
+                <span class="number">After</span>
+                <p>
+                  Operators can run a non-mutating, full-content audit and distinguish a clean
+                  store, discovered integrity damage, and an audit that could not finish.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <section id="mental-model">
+            <div class="section-kicker">Context &amp; intuition</div>
+            <h2>Think of the catalog as a ledger and the CAS as the vault.</h2>
+            <p>
+              Neither side is enough by itself. The catalog says what should exist and records its
+              expected identity and size. The CAS contains the actual bytes under paths derived
+              from their BLAKE3 hashes. Audit asks whether the ledger and vault agree—and whether
+              each is internally sound.
+            </p>
+
+            <div class="ledger-diagram" role="img" aria-label="Catalog and CAS reconciled in both directions">
+              <div class="ledger-box catalog">
+                <h3>SQLite catalog · the ledger</h3>
+                <ul>
+                  <li>Blob hash and expected byte size</li>
+                  <li>Source-file observations</li>
+                  <li>Deletion marker used as a GC candidate</li>
+                  <li>Schema, constraints, and foreign keys</li>
+                </ul>
+              </div>
+              <div class="reconcile">Compare<br />both ways</div>
+              <div class="ledger-box cas">
+                <h3>CAS filesystem · the vault</h3>
+                <ul>
+                  <li>Canonical path derived from hash</li>
+                  <li>Regular-file type and metadata length</li>
+                  <li>Actual streamed byte count</li>
+                  <li>Actual BLAKE3 digest</li>
+                </ul>
+              </div>
+            </div>
+
+            <div class="callout">
+              <strong>The central invariant:</strong>
+              <p>
+                A healthy blob has one valid catalog identity, one canonical regular CAS file,
+                matching sizes, and content whose BLAKE3 digest equals both the catalog hash and
+                filename.
+              </p>
+            </div>
+          </section>
+
+          <section id="contract">
+            <div class="section-kicker">CLI behavior</div>
+            <h2>The command is deliberately narrow.</h2>
+            <pre><code>media-importer audit \
+  --store &lt;STORE_ROOT&gt; \
+  [--db &lt;DB_PATH&gt;] \
+  [--chunk-size &lt;BYTES&gt;]</code></pre>
+
+            <div class="grid-3">
+              <div class="card">
+                <h3><code>--store</code></h3>
+                <p>
+                  Required. The store and its <code>blobs</code> directory must already exist as
+                  real directories—not symlinks.
+                </p>
+              </div>
+              <div class="card">
+                <h3><code>--db</code></h3>
+                <p>
+                  Optional. Defaults to <code>STORE_ROOT/catalog.sqlite</code>; an explicit catalog
+                  may live inside or outside the store.
+                </p>
+              </div>
+              <div class="card">
+                <h3><code>--chunk-size</code></h3>
+                <p>
+                  Optional and non-zero. It controls bounded streaming memory, not the amount of
+                  content verified.
+                </p>
+              </div>
+            </div>
+
+            <h3 style="margin-top: 26px">Exit status is part of the API</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Exit</th>
+                    <th>Meaning</th>
+                    <th>Output channel</th>
+                    <th>Example</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><span class="status clean">0 · clean</span></td>
+                    <td>Audit completed and found no integrity problem.</td>
+                    <td>Summary on stdout</td>
+                    <td>All catalog blobs exist and hash correctly.</td>
+                  </tr>
+                  <tr>
+                    <td><span class="status error">1 · operational</span></td>
+                    <td>Configuration or an operational failure prevented a complete audit.</td>
+                    <td>Error report on stderr</td>
+                    <td>Missing catalog, unreadable root, unsupported schema.</td>
+                  </tr>
+                  <tr>
+                    <td><span class="status finding">2 · findings</span></td>
+                    <td>Audit completed, but one or more integrity findings were discovered.</td>
+                    <td>Findings and summary on stdout</td>
+                    <td>Missing blob, orphan, hash mismatch.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="callout warning">
+              <strong>Why exit 2 is not an exception.</strong>
+              <p>
+                Finding damaged or inconsistent data is a successful execution of the audit
+                operation. The report is returned as normal domain data, rendered fully, and only
+                then mapped to exit 2. Exit 1 is reserved for “we could not finish inspecting.”
+              </p>
+            </div>
+          </section>
+
+          <section id="pipeline">
+            <div class="section-kicker">Execution model</div>
+            <h2>One deterministic pass, with side effects kept at the edges.</h2>
+            <div class="flow">
+              <div class="flow-step">
+                <strong>1. Validate inputs</strong>
+                <span>Real store, blobs root, catalog, non-zero chunk</span>
+              </div>
+              <div class="flow-step">
+                <strong>2. Snapshot catalog</strong>
+                <span>Read-only transaction, checks, raw row decoding</span>
+              </div>
+              <div class="flow-step">
+                <strong>3. Classify CAS</strong>
+                <span>Raw-byte order, no symlink traversal, strict layout</span>
+              </div>
+              <div class="flow-step">
+                <strong>4. Reconcile &amp; hash</strong>
+                <span>Union of identities; each canonical file once</span>
+              </div>
+              <div class="flow-step">
+                <strong>5. Sort &amp; render</strong>
+                <span>Stable findings, exact counters, exit selection</span>
+              </div>
+            </div>
+
+            <p>
+              The orchestration lives behind the deep operation
+              <code>audit_store(AuditConfig) -&gt; Result&lt;AuditReport&gt;</code>. CLI code does
+              not choreograph SQL or filesystem traversal; catalog code does not inspect CAS paths.
+            </p>
+
+            <details>
+              <summary>Why hash after traversal instead of during traversal?</summary>
+              <div>
+                <p>
+                  Completing classification first produces deterministic reconciliation work and
+                  keeps filesystem discovery separate from content verification. It also makes it
+                  straightforward to hash each valid identity at most once, even when the file is
+                  both a catalog match and a CAS entry.
+                </p>
+              </div>
+            </details>
+          </section>
+
+          <section id="catalog">
+            <div class="section-kicker">SQLite side</div>
+            <h2>The database is opened read-only, but “read-only” has WAL nuance.</h2>
+            <p>
+              SQLite may hold committed data in a non-empty write-ahead log. Opening the main
+              database as immutable while such a WAL exists could ignore those committed frames.
+              Milestone 3 therefore uses a hybrid policy.
+            </p>
+
+            <div class="grid-2">
+              <div class="card">
+                <h3>No non-empty WAL</h3>
+                <p>
+                  Build a correctly percent-encoded SQLite URI using
+                  <code>mode=ro&amp;immutable=1</code>. The quiescence precondition makes the
+                  immutable assertion safe and prevents sidecar creation.
+                </p>
+              </div>
+              <div class="card">
+                <h3>Non-empty WAL exists</h3>
+                <p>
+                  Require real, readable WAL and SHM sidecars and open with <code>mode=ro</code>
+                  without immutable mode, allowing SQLite to observe committed WAL frames.
+                </p>
+              </div>
+            </div>
+
+            <div class="callout warning">
+              <strong>Non-empty WAL without usable SHM is exit 1.</strong>
+              <p>
+                Audit refuses to inspect stale main-database state, does not create the missing
+                sidecar, and tells the operator to cleanly close or checkpoint with a writer before
+                retrying.
+              </p>
+            </div>
+
+            <h3>Catalog verification has three layers</h3>
+            <div class="grid-3">
+              <div class="card">
+                <span class="number">01</span>
+                <h3>SQLite engine integrity</h3>
+                <p>
+                  Run <code>PRAGMA integrity_check</code> and
+                  <code>PRAGMA foreign_key_check</code>. The single
+                  <code>integrity_check</code> row <code>ok</code> is explicitly ignored.
+                </p>
+              </div>
+              <div class="card">
+                <span class="number">02</span>
+                <h3>Semantic schema shape</h3>
+                <p>
+                  Validate ordered columns, declared types, nullability, PK roles, FK shape,
+                  indexes, uniqueness, required CHECK constraints, and unexpected user objects.
+                </p>
+              </div>
+              <div class="card">
+                <span class="number">03</span>
+                <h3>Domain row values</h3>
+                <p>
+                  Decode through raw SQLite values so wrong storage classes become findings rather
+                  than panics or premature query failures.
+                </p>
+              </div>
+            </div>
+
+            <h3 style="margin-top: 26px">Rows are validated, not blindly deserialized</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Table</th>
+                    <th>Important checks</th>
+                    <th>Invalid-row result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><code>blobs</code></td>
+                    <td>
+                      64 lowercase hex hash; non-negative size; integer creation timestamp; null
+                      or integer deletion timestamp.
+                    </td>
+                    <td><code>INVALID_BLOB_ROW</code>; row still counts in catalog total.</td>
+                  </tr>
+                  <tr>
+                    <td><code>source_files</code></td>
+                    <td>
+                      Non-empty root; portable relative path; valid referenced hash; matching size;
+                      positive seen count; ordered timestamps.
+                    </td>
+                    <td><code>INVALID_SOURCE_ROW</code>; later rows are still inspected.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <p class="small" style="margin-top: 14px">
+              SQL used by the application was extracted to colocated
+              <code>catalog/sql/*.sql</code> files and loaded with <code>include_str!</code>. A
+              Rust source-policy test prevents application SQL literals from returning unnoticed.
+            </p>
+          </section>
+
+          <section id="cas">
+            <div class="section-kicker">Filesystem side</div>
+            <h2>Only one path shape is a valid blob.</h2>
+            <div class="tree">STORE_ROOT/
+└── blobs/
+    └── 01/                         first two lowercase hex digits
+        └── 23/                     next two lowercase hex digits
+            └── 0123…(64 hex)…cdef  full matching BLAKE3 hash</div>
+
+            <p>
+              A valid CAS blob is a regular file at exactly that depth. Empty valid shard
+              directories are allowed. Everything else is either an invalid CAS entry or a local
+              I/O finding.
+            </p>
+
+            <div class="grid-2">
+              <div class="card">
+                <h3>Strict classification</h3>
+                <ul>
+                  <li>Lowercase two-character hex shards only</li>
+                  <li>Exactly 64 lowercase hex characters in filename</li>
+                  <li>Shard prefix must match filename</li>
+                  <li>No shallow files or over-deep content</li>
+                  <li>No symlinks or special files</li>
+                </ul>
+              </div>
+              <div class="card">
+                <h3>Safe traversal identity</h3>
+                <ul>
+                  <li>Directory entries sorted by raw <code>OsStr</code> bytes</li>
+                  <li>Non-UTF-8 and control bytes rendered as <code>\xNN</code></li>
+                  <li>Malformed real directories are traversed</li>
+                  <li>Symlinked directories are never followed</li>
+                  <li>Final blob open uses no-follow behavior on Unix</li>
+                </ul>
+              </div>
+            </div>
+
+            <div class="callout">
+              <strong>Why raw bytes matter.</strong>
+              <p>
+                <code>to_string_lossy()</code> can collapse different invalid byte sequences into
+                the same replacement character. Raw-byte sorting and escaping keep finding
+                identities collision-resistant and deterministic on Linux and macOS.
+              </p>
+            </div>
+          </section>
+
+          <section id="reconciliation">
+            <div class="section-kicker">Bidirectional truth</div>
+            <h2>Reconciliation is a set comparison plus content proof.</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Catalog row</th>
+                    <th>Canonical CAS file</th>
+                    <th>Result</th>
+                    <th>Hash?</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Present</td>
+                    <td>Present regular file</td>
+                    <td>Compare size; verify full content hash.</td>
+                    <td>Yes</td>
+                  </tr>
+                  <tr>
+                    <td>Present</td>
+                    <td>Absent</td>
+                    <td><code>MISSING_BLOB</code></td>
+                    <td>No file to hash</td>
+                  </tr>
+                  <tr>
+                    <td>Present</td>
+                    <td>Non-regular object</td>
+                    <td><code>NON_REGULAR_BLOB</code> plus layout evidence where applicable</td>
+                    <td>No</td>
+                  </tr>
+                  <tr>
+                    <td>Absent</td>
+                    <td>Present canonical file</td>
+                    <td><code>ORPHAN_BLOB</code>; content identity still verified</td>
+                    <td>Yes</td>
+                  </tr>
+                  <tr>
+                    <td>Absent</td>
+                    <td>Invalid-layout file</td>
+                    <td><code>INVALID_CAS_ENTRY</code>, not an orphan</td>
+                    <td>No</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h3 style="margin-top: 26px">Size has three witnesses</h3>
+            <p>
+              For a cataloged file, audit compares the catalog size, metadata length from the
+              safely opened file, and streamed byte count. A size mismatch does not skip hashing:
+              full hashing can reveal independent corruption in the same run.
+            </p>
+
+            <h3>Deleted blobs are still expected</h3>
+            <p>
+              A non-null <code>deleted_at_ms</code> marks a blob as a GC candidate. It is not an
+              instruction for audit to ignore or expect absence. Audit counts it once and verifies
+              its CAS file exactly like a live blob.
+            </p>
+
+            <div class="finding-list" aria-label="Stable audit finding categories">
+              <div class="finding"><code>BLOB_IO_ERROR</code><span>One valid blob could not be safely read.</span></div>
+              <div class="finding"><code>CAS_IO_ERROR</code><span>A nested CAS entry could not be enumerated or stated.</span></div>
+              <div class="finding"><code>CATALOG_INTEGRITY</code><span>SQLite or semantic schema evidence is invalid.</span></div>
+              <div class="finding"><code>HASH_MISMATCH</code><span>Streamed BLAKE3 differs from identity.</span></div>
+              <div class="finding"><code>INVALID_BLOB_ROW</code><span>A catalog blob row violates domain rules.</span></div>
+              <div class="finding"><code>INVALID_CAS_ENTRY</code><span>An entry violates strict CAS layout or type.</span></div>
+              <div class="finding"><code>INVALID_SOURCE_ROW</code><span>A source row violates durable invariants.</span></div>
+              <div class="finding"><code>MISSING_BLOB</code><span>Catalog expects a blob that is absent.</span></div>
+              <div class="finding"><code>NON_REGULAR_BLOB</code><span>Expected canonical path is not a regular file.</span></div>
+              <div class="finding"><code>ORPHAN_BLOB</code><span>Canonical CAS blob has no catalog row.</span></div>
+              <div class="finding"><code>SIZE_MISMATCH</code><span>Catalog, metadata, or stream lengths disagree.</span></div>
+            </div>
+          </section>
+
+          <section id="safety">
+            <div class="section-kicker">Safety properties</div>
+            <h2>Read-only is treated as a behavior to prove.</h2>
+            <div class="grid-3">
+              <div class="card">
+                <h3>No durable mutation</h3>
+                <p>
+                  No store creation, migrations, repair, deletion, checkpoint, staging cleanup,
+                  chmod, or catalog lock acquisition.
+                </p>
+              </div>
+              <div class="card">
+                <h3>Race-resistant final open</h3>
+                <p>
+                  Classify with symlink metadata, open the final blob with no-follow behavior, then
+                  hash the already-open file and inspect its opened metadata.
+                </p>
+              </div>
+              <div class="card">
+                <h3>Bounded content memory</h3>
+                <p>
+                  One file is streamed at a time through an explicitly reserved chunk buffer.
+                  Content memory is <code>O(chunk size)</code>.
+                </p>
+              </div>
+            </div>
+
+            <h3 style="margin-top: 26px">Resource and overflow discipline</h3>
+            <ul>
+              <li>
+                Potentially large indexes, finding lists, directory-entry lists, schema results,
+                reconciliation keys, and hash buffers use <code>try_reserve</code>.
+              </li>
+              <li>
+                Allocation failure becomes an operational error instead of an uncontrolled
+                assumption.
+              </li>
+              <li>
+                Blob counts, hashed-file counts, GC candidates, and streamed byte counts use
+                checked arithmetic.
+              </li>
+              <li>
+                Malformed SQLite presentation is bounded so damaged values cannot force huge
+                diagnostic output.
+              </li>
+            </ul>
+
+            <div class="callout warning">
+              <strong>Quiescence remains a correctness precondition.</strong>
+              <p>
+                SQLite can provide a consistent database snapshot, but the catalog and CAS cannot
+                be snapshotted atomically together. A concurrent import could transiently resemble
+                an orphan or missing blob. Milestone 3 documents this rather than enforcing a
+                cross-resource lock.
+              </p>
+            </div>
+          </section>
+
+          <section id="architecture">
+            <div class="section-kicker">Code ownership</div>
+            <h2>Each module owns one kind of truth.</h2>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Area</th>
+                    <th>Milestone 3 responsibility</th>
+                    <th>Representative change</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><a href="../../crates/media-importer/src/cli.rs"><code>cli</code></a></td>
+                    <td>Parse audit args, render findings and counters.</td>
+                    <td>Added <code>AuditArgs</code>, command dispatch, report renderer.</td>
+                  </tr>
+                  <tr>
+                    <td><a href="../../crates/media-importer/src/config.rs"><code>config</code></a></td>
+                    <td>Turn untrusted options into validated application config.</td>
+                    <td>Added <code>AuditOptions</code> and <code>AuditConfig</code>.</td>
+                  </tr>
+                  <tr>
+                    <td><a href="../../crates/media-importer/src/catalog.rs"><code>catalog</code></a></td>
+                    <td>Read-only SQLite opening, transactions, schema and row inspection.</td>
+                    <td>Hybrid WAL policy and purpose-specific audit snapshot.</td>
+                  </tr>
+                  <tr>
+                    <td><a href="../../crates/media-importer/src/audit.rs"><code>audit</code></a></td>
+                    <td>Orchestrate catalog/CAS reconciliation, hashing, counters, findings.</td>
+                    <td>Added the deep <code>audit_store</code> operation.</td>
+                  </tr>
+                  <tr>
+                    <td><a href="../../crates/media-importer/src/hashing.rs"><code>hashing</code></a></td>
+                    <td>Bounded BLAKE3 streaming over an already-open file.</td>
+                    <td>Added <code>hash_open_file</code>, checked byte counts.</td>
+                  </tr>
+                  <tr>
+                    <td><a href="../../crates/media-importer/src/paths.rs"><code>paths</code></a></td>
+                    <td>Validated hashes, canonical blob paths, reusable existing-store checks.</td>
+                    <td>Hash ordering/identity traits; command-neutral store validation.</td>
+                  </tr>
+                  <tr>
+                    <td><a href="../../crates/media-importer/src/main.rs"><code>main</code></a></td>
+                    <td>Install diagnostics and map successful outcomes to process exit codes.</td>
+                    <td>Returns <code>ExitCode</code>; dirty audit maps to 2.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <details>
+              <summary>What changed later in Milestone 4?</summary>
+              <div>
+                <p>
+                  Reusable finding identity, stable sorting, CAS traversal, and no-follow blob open
+                  were extracted into shared <code>integrity</code> and <code>store</code>
+                  facilities for garbage collection. The current <code>audit.rs</code> is therefore
+                  shorter than the original Milestone 3 implementation, but its external contract
+                  remains the same.
+                </p>
+              </div>
+            </details>
+          </section>
+
+          <section id="review">
+            <div class="section-kicker">Review-driven corrections</div>
+            <h2>The implementation was tightened substantially during review.</h2>
+            <div class="timeline">
+              <div class="timeline-item">
+                <h3>Initial vertical slice</h3>
+                <p>
+                  CLI, config, catalog inspection, CAS traversal, reconciliation, hashing, report
+                  rendering, and exit status mapping were connected end to end.
+                </p>
+              </div>
+              <div class="timeline-item">
+                <h3>SQL ownership corrected</h3>
+                <p>
+                  Audit SQL literals were moved from <code>catalog.rs</code> into colocated
+                  <code>.sql</code> files. A Rust integration policy test now scans production
+                  sources and fails <code>cargo test</code>—and therefore <code>prek</code>—if
+                  application SQL is inlined again.
+                </p>
+              </div>
+              <div class="timeline-item">
+                <h3>README consolidated</h3>
+                <p>
+                  Obsolete scaffold and Milestone 1 language was removed. Commands, audit cost,
+                  quiescence, report-only behavior, deleted-blob semantics, and exits were presented
+                  as one coherent current document.
+                </p>
+              </div>
+              <div class="timeline-item">
+                <h3>WAL and immutable handling completed</h3>
+                <p>
+                  The simplistic read-only open became a percent-encoded SQLite URI policy that
+                  distinguishes no-WAL immutable access from existing WAL-backed snapshots.
+                </p>
+              </div>
+              <div class="timeline-item">
+                <h3>Schema validation became semantic</h3>
+                <p>
+                  Object-name checks were expanded to column order/types/nullability/PKs, FK shape,
+                  required indexes, unique identity, CHECK constraints, and extra user objects.
+                </p>
+              </div>
+              <div class="timeline-item">
+                <h3>Filesystem identity and resources hardened</h3>
+                <p>
+                  Lossy path conversion was removed from stable identity, sorting moved to raw
+                  bytes, classification became a pure function, allocations gained fallible
+                  reservation, and counters gained checked arithmetic.
+                </p>
+              </div>
+              <div class="timeline-item">
+                <h3>Adversarial coverage expanded</h3>
+                <p>
+                  Tests grew from the initial happy-path and basic failure cases to WAL, schema
+                  impostor, malformed-value, immutability, deleted-blob, orphan corruption,
+                  non-UTF-8, layout, ordering, and multi-chunk scenarios.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <section id="testing">
+            <div class="section-kicker">Verification strategy</div>
+            <h2>Tests exercise observable contracts with real tiny stores.</h2>
+            <p>
+              The suite favors CLI integration tests backed by real temporary directories and
+              SQLite catalogs, plus focused unit tests for pure CAS classification and raw path
+              rendering.
+            </p>
+
+            <div class="grid-3">
+              <div class="card">
+                <h3>Clean and outcome tests</h3>
+                <p>
+                  Help surface, exact counters, default and explicit DB paths, exit 0/1/2,
+                  non-zero chunk behavior, and unchanged import/build-tree outcomes.
+                </p>
+              </div>
+              <div class="card">
+                <h3>Catalog adversaries</h3>
+                <p>
+                  WAL visibility, missing SHM, schema impostors, wrong FK and CHECK constraints,
+                  foreign-key violations, malformed storage classes, and invalid domain values.
+                </p>
+              </div>
+              <div class="card">
+                <h3>CAS adversaries</h3>
+                <p>
+                  Missing blobs, size-plus-hash corruption, deleted blobs, orphans, malformed
+                  depths and shards, symlinks, empty shards, ordering, and non-UTF-8 names.
+                </p>
+              </div>
+            </div>
+
+            <h3 style="margin-top: 26px">Acceptance commands</h3>
+            <pre><code>cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+prek run --all-files</code></pre>
+
+            <p class="small" style="margin-top: 14px">
+              The non-UTF-8 filesystem integration branch is conditional on the host filesystem
+              allowing such a filename. Raw-byte escaping itself remains covered by a pure unit
+              test, so the platform limitation does not leave the conversion logic untested.
+            </p>
+          </section>
+
+          <section id="limits">
+            <div class="section-kicker">Deliberate boundaries</div>
+            <h2>What Milestone 3 does not do.</h2>
+            <div class="grid-2">
+              <div class="card">
+                <h3>No mutation or repair</h3>
+                <ul>
+                  <li>No deletion, quarantine, chmod, move, or repair</li>
+                  <li>No automatic marking of unreferenced blobs</li>
+                  <li>No migration or managed checkpoint</li>
+                  <li>No staging cleanup</li>
+                </ul>
+              </div>
+              <div class="card">
+                <h3>No expanded inspection surface</h3>
+                <ul>
+                  <li>No browse-tree verification</li>
+                  <li>No source filesystem reinspection</li>
+                  <li>No quick or metadata-only audit mode</li>
+                  <li>No JSON, workers, progress bars, or parallel hashing</li>
+                </ul>
+              </div>
+            </div>
+
+            <div class="callout">
+              <strong>Why the narrow scope is valuable.</strong>
+              <p>
+                Milestone 3 establishes trustworthy classification and reporting without combining
+                it with destructive policy. That separation made the later mark-and-sweep garbage
+                collection milestone safer to build and easier to review.
+              </p>
+            </div>
+          </section>
+
+          <section id="quiz">
+            <div class="section-kicker">Knowledge check</div>
+            <h2>You must pass the Milestone 3 quiz.</h2>
+            <div class="quiz-intro">
+              <p>
+                Answer all 12 questions, then grade the quiz. A pass requires at least 10 correct
+                answers. Each graded question explains the reasoning so a failed attempt becomes a
+                study guide.
+              </p>
+              <div class="pass-mark">10 / 12<br /><span class="small">to pass</span></div>
+            </div>
+
+            <form id="quiz-form">
+              <fieldset class="question" data-answer="b">
+                <legend>1. What does audit exit status 2 mean?</legend>
+                <label class="option"><input type="radio" name="q1" value="a" /> Audit crashed while reading one blob.</label>
+                <label class="option"><input type="radio" name="q1" value="b" /> Audit completed and reported at least one integrity finding.</label>
+                <label class="option"><input type="radio" name="q1" value="c" /> The catalog schema is unsupported, so audit could not start.</label>
+                <p class="explanation">
+                  Exit 2 is a completed domain outcome. Operational or configuration failures use
+                  exit 1.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="c">
+                <legend>2. Why does the audit reconcile catalog and CAS in both directions?</legend>
+                <label class="option"><input type="radio" name="q2" value="a" /> To make the browse tree deterministic.</label>
+                <label class="option"><input type="radio" name="q2" value="b" /> To avoid hashing cataloged files.</label>
+                <label class="option"><input type="radio" name="q2" value="c" /> One direction finds missing expected blobs; the other finds canonical orphan blobs.</label>
+                <p class="explanation">
+                  Catalog → CAS detects missing or non-regular expected objects. CAS → catalog
+                  detects canonical files with no row.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="a">
+                <legend>3. When is <code>immutable=1</code> used?</legend>
+                <label class="option"><input type="radio" name="q3" value="a" /> Only when there is no non-empty WAL and the store is assumed quiescent.</label>
+                <label class="option"><input type="radio" name="q3" value="b" /> Always, because audit never writes.</label>
+                <label class="option"><input type="radio" name="q3" value="c" /> Only when a non-empty WAL and SHM both exist.</label>
+                <p class="explanation">
+                  Immutable mode could ignore committed WAL frames. It is safe in the no-WAL branch
+                  under the quiescence precondition.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="b">
+                <legend>4. A canonical CAS file has no catalog row and its content hash is wrong. What should be reported?</legend>
+                <label class="option"><input type="radio" name="q4" value="a" /> Only <code>ORPHAN_BLOB</code>.</label>
+                <label class="option"><input type="radio" name="q4" value="b" /> Both <code>ORPHAN_BLOB</code> and <code>HASH_MISMATCH</code>.</label>
+                <label class="option"><input type="radio" name="q4" value="c" /> Only <code>INVALID_CAS_ENTRY</code>.</label>
+                <p class="explanation">
+                  These are distinct facts: the file is unindexed and its bytes do not match its
+                  canonical identity.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="c">
+                <legend>5. How is a blob with non-null <code>deleted_at_ms</code> treated?</legend>
+                <label class="option"><input type="radio" name="q5" value="a" /> It is ignored because deletion means absence is expected.</label>
+                <label class="option"><input type="radio" name="q5" value="b" /> It is immediately removed from the CAS.</label>
+                <label class="option"><input type="radio" name="q5" value="c" /> It counts as a GC candidate and is still fully required and verified.</label>
+                <p class="explanation">
+                  Logical deletion is not physical absence. Audit reports, counts, and verifies; it
+                  does not sweep.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="a">
+                <legend>6. Why are filesystem names sorted and identified by raw bytes?</legend>
+                <label class="option"><input type="radio" name="q6" value="a" /> Lossy Unicode conversion can collide and undermine deterministic identity.</label>
+                <label class="option"><input type="radio" name="q6" value="b" /> BLAKE3 only accepts byte-sorted filenames.</label>
+                <label class="option"><input type="radio" name="q6" value="c" /> SQLite requires filesystem paths to be ASCII.</label>
+                <p class="explanation">
+                  Raw bytes preserve distinct non-UTF-8 names. Presentation escapes unsafe bytes as
+                  <code>\xNN</code>.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="b">
+                <legend>7. If catalog size differs from filesystem metadata, does audit skip hashing?</legend>
+                <label class="option"><input type="radio" name="q7" value="a" /> Yes; the size finding is sufficient.</label>
+                <label class="option"><input type="radio" name="q7" value="b" /> No; it streams the whole valid file to detect independent hash corruption.</label>
+                <label class="option"><input type="radio" name="q7" value="c" /> Only if <code>--quick</code> is absent.</label>
+                <p class="explanation">
+                  Milestone 3 has no quick mode. Full hashing is intentionally performed despite a
+                  size mismatch.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="c">
+                <legend>8. Which entry is a valid CAS blob?</legend>
+                <label class="option"><input type="radio" name="q8" value="a" /> A 64-hex file directly under <code>blobs/</code>.</label>
+                <label class="option"><input type="radio" name="q8" value="b" /> A symlink at the canonical three-level path.</label>
+                <label class="option"><input type="radio" name="q8" value="c" /> A regular file at <code>blobs/01/23/0123…</code> whose shards match its 64-character lowercase hash.</label>
+                <p class="explanation">
+                  Validity requires exact depth, lowercase hex, matching shard prefixes, full hash
+                  filename, and a regular file.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="a">
+                <legend>9. Why does catalog row decoding use raw SQLite values?</legend>
+                <label class="option"><input type="radio" name="q9" value="a" /> Schema v1 is not STRICT, so wrong storage classes must become findings without aborting later rows.</label>
+                <label class="option"><input type="radio" name="q9" value="b" /> Raw values are required to make writes faster.</label>
+                <label class="option"><input type="radio" name="q9" value="c" /> It bypasses the read-only transaction.</label>
+                <p class="explanation">
+                  A damaged non-STRICT database may contain text where an integer is expected. The
+                  audit records that row-level problem and continues where safe.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="b">
+                <legend>10. What is the content-memory complexity of hashing?</legend>
+                <label class="option"><input type="radio" name="q10" value="a" /> <code>O(total CAS bytes)</code></label>
+                <label class="option"><input type="radio" name="q10" value="b" /> <code>O(chunk size)</code>, with one file streamed at a time.</label>
+                <label class="option"><input type="radio" name="q10" value="c" /> <code>O(number of source rows)</code></label>
+                <p class="explanation">
+                  Metadata indexes scale with catalog and CAS entries, but blob content is never
+                  buffered wholesale.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="c">
+                <legend>11. Why must the store remain quiescent during audit?</legend>
+                <label class="option"><input type="radio" name="q11" value="a" /> Audit takes an exclusive SQLite write lock.</label>
+                <label class="option"><input type="radio" name="q11" value="b" /> BLAKE3 cannot hash files while another process exists.</label>
+                <label class="option"><input type="radio" name="q11" value="c" /> SQLite and the CAS filesystem cannot be snapshotted atomically together.</label>
+                <p class="explanation">
+                  A concurrent import can temporarily make valid in-progress state look like an
+                  orphan or missing blob.
+                </p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="a">
+                <legend>12. Where should application SQL live?</legend>
+                <label class="option"><input type="radio" name="q12" value="a" /> In colocated <code>.sql</code> files loaded by <code>include_str!</code>, enforced by a Rust policy test.</label>
+                <label class="option"><input type="radio" name="q12" value="b" /> Inline in <code>audit.rs</code> so orchestration owns all details.</label>
+                <label class="option"><input type="radio" name="q12" value="c" /> In CLI modules because they select exit status.</label>
+                <p class="explanation">
+                  Raw SQL belongs to the catalog boundary and remains separately reviewable in
+                  colocated SQL files.
+                </p>
+              </fieldset>
+
+              <div class="quiz-actions">
+                <button class="button" type="submit">Grade my answers</button>
+                <button class="button secondary" type="button" id="reset-quiz">Reset quiz</button>
+                <span class="small" id="answered-count" aria-live="polite">0 of 12 answered</span>
+              </div>
+              <div id="quiz-result" class="quiz-result" role="status" aria-live="polite"></div>
+            </form>
+          </section>
+        </main>
+      </div>
+
+      <footer class="footer">
+        Media Importer · Milestone 3 integrity audit · implementation snapshot
+        <code>b5ca5d8</code>
+      </footer>
+    </div>
+
+    <script>
+      (() => {
+        const progress = document.getElementById("scroll-progress");
+        const tocLinks = [...document.querySelectorAll(".toc a")];
+        const sections = tocLinks
+          .map((link) => document.querySelector(link.getAttribute("href")))
+          .filter(Boolean);
+
+        const updateScroll = () => {
+          const scrollable = document.documentElement.scrollHeight - window.innerHeight;
+          const ratio = scrollable > 0 ? window.scrollY / scrollable : 0;
+          progress.style.width = `${Math.min(100, Math.max(0, ratio * 100))}%`;
+
+          let active = sections[0];
+          for (const section of sections) {
+            if (section.getBoundingClientRect().top <= 140) active = section;
+          }
+          tocLinks.forEach((link) => {
+            link.classList.toggle("active", link.getAttribute("href") === `#${active?.id}`);
+          });
+        };
+
+        window.addEventListener("scroll", updateScroll, { passive: true });
+        updateScroll();
+
+        const form = document.getElementById("quiz-form");
+        const questions = [...form.querySelectorAll(".question")];
+        const result = document.getElementById("quiz-result");
+        const answeredCount = document.getElementById("answered-count");
+        const resetButton = document.getElementById("reset-quiz");
+        const passScore = 10;
+
+        const updateAnswered = () => {
+          const answered = questions.filter((question) =>
+            question.querySelector("input:checked"),
+          ).length;
+          answeredCount.textContent = `${answered} of ${questions.length} answered`;
+        };
+
+        form.addEventListener("change", updateAnswered);
+
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          let score = 0;
+          let firstIncorrect = null;
+
+          questions.forEach((question) => {
+            const selected = question.querySelector("input:checked");
+            const correct = selected?.value === question.dataset.answer;
+            question.classList.add("graded");
+            question.classList.toggle("correct", correct);
+            question.classList.toggle("incorrect", !correct);
+            if (correct) {
+              score += 1;
+            } else if (!firstIncorrect) {
+              firstIncorrect = question;
+            }
+          });
+
+          const passed = score >= passScore;
+          result.className = `quiz-result ${passed ? "pass" : "fail"}`;
+          result.innerHTML = passed
+            ? `Passed — ${score}/${questions.length}. You have a working understanding of the Milestone 3 contract and implementation.`
+            : `Not yet — ${score}/${questions.length}. You need ${passScore}/${questions.length} to pass. Review the explanations on the marked questions and try again.`;
+          result.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+          if (!passed && firstIncorrect) {
+            setTimeout(() => firstIncorrect.focus({ preventScroll: true }), 350);
+          }
+        });
+
+        resetButton.addEventListener("click", () => {
+          form.reset();
+          questions.forEach((question) => {
+            question.classList.remove("graded", "correct", "incorrect");
+          });
+          result.className = "quiz-result";
+          result.textContent = "";
+          updateAnswered();
+          questions[0].scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+      })();
+    </script>
+  </body>
+</html>
