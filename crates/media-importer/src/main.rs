@@ -1,8 +1,10 @@
 use color_eyre::Result;
 use media_importer::audit::audit_store;
 use media_importer::cli::{
-    Cli, CliCommand, render_audit_report, render_build_tree_report, render_import_report,
+    Cli, CliCommand, render_audit_report, render_build_tree_report, render_gc_report,
+    render_import_report,
 };
+use media_importer::gc::{GcOutcome, collect_garbage};
 use media_importer::ingest::import_source;
 use media_importer::materialize::build_tree;
 use tracing_subscriber::EnvFilter;
@@ -33,6 +35,17 @@ fn main() -> Result<std::process::ExitCode> {
                 std::process::ExitCode::from(2)
             });
         }
+        CliCommand::Gc(config) => match collect_garbage(config)? {
+            GcOutcome::Complete(report) => render_gc_report(&report, false),
+            GcOutcome::Blocked(report) => {
+                render_gc_report(&report, false);
+                return Ok(std::process::ExitCode::from(2));
+            }
+            GcOutcome::Incomplete { report, error } => {
+                render_gc_report(&report, true);
+                return Err(error);
+            }
+        },
     }
 
     Ok(std::process::ExitCode::SUCCESS)

@@ -1,12 +1,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, bail, eyre};
-use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
+use rusqlite::{
+    Connection, MAIN_DB, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 
-use crate::audit::{AuditFinding, push_finding};
+use crate::integrity::{IntegrityFinding as AuditFinding, push_finding};
 use crate::paths::{BlobHash, SourceRelativePath};
 use rusqlite::types::ValueRef;
 use std::collections::{BTreeSet, HashMap};
@@ -23,11 +26,19 @@ const AUDIT_FOREIGN_KEYS_SQL: &str = include_str!("catalog/sql/audit_foreign_key
 const AUDIT_INDEXES_SQL: &str = include_str!("catalog/sql/audit_indexes.sql");
 const AUDIT_INDEX_COLUMNS_SQL: &str = include_str!("catalog/sql/audit_index_columns.sql");
 const AUDIT_SOURCE_FILES_SQL: &str = include_str!("catalog/sql/audit_source_files.sql");
+const GC_CONNECTION_PRAGMAS_SQL: &str = include_str!("catalog/sql/gc_connection_pragmas.sql");
+const GC_MARK_SQL: &str = include_str!("catalog/sql/gc_mark.sql");
+const GC_RESURRECT_SQL: &str = include_str!("catalog/sql/gc_resurrect.sql");
+const GC_SNAPSHOT_SQL: &str = include_str!("catalog/sql/gc_snapshot.sql");
+const GC_SWEEP_SQL: &str = include_str!("catalog/sql/gc_sweep.sql");
+const READ_JOURNAL_MODE_SQL: &str = include_str!("catalog/sql/read_journal_mode.sql");
 
 #[derive(Clone, Debug)]
 pub struct CatalogBlob {
     pub hash: BlobHash,
     pub size_bytes: u64,
+    pub marked_at_ms: Option<i64>,
+    pub referenced: bool,
 }
 
 pub struct CatalogAuditSnapshot {
@@ -38,6 +49,30 @@ pub struct CatalogAuditSnapshot {
 }
 
 pub fn inspect_catalog_for_audit(path: &Path) -> Result<CatalogAuditSnapshot> {
+    let connection = open_existing_read_only(path, "auditing")?;
+    connection
+        .execute_batch(AUDIT_BEGIN_SQL)
+        .wrap_err("begin audit read transaction")?;
+    let snapshot = inspect_catalog_connection(&connection, AUDIT_BLOBS_SQL)?;
+    connection
+        .execute_batch(AUDIT_COMMIT_SQL)
+        .wrap_err("finish audit read transaction")?;
+    Ok(snapshot)
+}
+
+pub fn inspect_catalog_for_gc_dry_run(path: &Path) -> Result<CatalogAuditSnapshot> {
+    let connection = open_existing_read_only(path, "garbage collection dry run")?;
+    connection
+        .execute_batch(AUDIT_BEGIN_SQL)
+        .wrap_err("begin GC dry-run read transaction")?;
+    let snapshot = inspect_catalog_connection(&connection, GC_SNAPSHOT_SQL)?;
+    connection
+        .execute_batch(AUDIT_COMMIT_SQL)
+        .wrap_err("finish GC dry-run read transaction")?;
+    Ok(snapshot)
+}
+
+fn open_existing_read_only(path: &Path, operation: &str) -> Result<Connection> {
     let metadata =
         fs::symlink_metadata(path).wrap_err_with(|| format!("stat catalog database {:?}", path))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -62,18 +97,24 @@ pub fn inspect_catalog_for_audit(path: &Path) -> Result<CatalogAuditSnapshot> {
     let uri = sqlite_read_only_uri(path, !nonempty_wal)?;
     let connection = Connection::open_with_flags(
         uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
-    .wrap_err_with(|| format!("open read-only catalog database {:?}", path))?;
+    .wrap_err_with(|| format!("open read-only catalog database for {operation} {:?}", path))?;
     let version: i64 = connection
         .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
         .wrap_err("read catalog schema version")?;
     if version != CURRENT_SCHEMA_VERSION {
         bail!("catalog schema version {version} is unsupported; expected {CURRENT_SCHEMA_VERSION}");
     }
-    connection
-        .execute_batch(AUDIT_BEGIN_SQL)
-        .wrap_err("begin audit read transaction")?;
+    Ok(connection)
+}
+
+fn inspect_catalog_connection(
+    connection: &Connection,
+    blob_query: &str,
+) -> Result<CatalogAuditSnapshot> {
     let mut findings = Vec::new();
     {
         let mut stmt = connection
@@ -119,13 +160,13 @@ pub fn inspect_catalog_for_audit(path: &Path) -> Result<CatalogAuditSnapshot> {
             )?;
         }
     }
-    validate_schema(&connection, &mut findings)?;
+    validate_schema(connection, &mut findings)?;
     let mut valid_blobs = HashMap::new();
     let mut blob_rows_seen = 0_u64;
     let mut gc_candidates = 0_u64;
     {
         let mut stmt = connection
-            .prepare(AUDIT_BLOBS_SQL)
+            .prepare(blob_query)
             .wrap_err("prepare blob audit query")?;
         let mut rows = stmt.query([]).wrap_err("query blobs for audit")?;
         while let Some(row) = rows.next().wrap_err("enumerate blob rows")? {
@@ -153,15 +194,27 @@ pub fn inspect_catalog_for_audit(path: &Path) -> Result<CatalogAuditSnapshot> {
             if !matches!(row.get_ref(3)?, ValueRef::Integer(_)) {
                 reasons.push("invalid-created-at");
             }
-            match row.get_ref(4)? {
-                ValueRef::Null => {}
-                ValueRef::Integer(_) => {
+            let marked_at_ms = match row.get_ref(4)? {
+                ValueRef::Null => None,
+                ValueRef::Integer(value) => {
                     gc_candidates = gc_candidates
                         .checked_add(1)
-                        .ok_or_else(|| eyre!("GC counter overflow"))?
+                        .ok_or_else(|| eyre!("GC counter overflow"))?;
+                    Some(value)
                 }
-                _ => reasons.push("invalid-deleted-at"),
-            }
+                _ => {
+                    reasons.push("invalid-deleted-at");
+                    None
+                }
+            };
+            let referenced = match row.get_ref(5)? {
+                ValueRef::Integer(0) => Some(false),
+                ValueRef::Integer(1) => Some(true),
+                _ => {
+                    reasons.push("invalid-reachability");
+                    None
+                }
+            };
             if reasons.is_empty() {
                 let hash = hash.expect("validated");
                 valid_blobs
@@ -172,6 +225,8 @@ pub fn inspect_catalog_for_audit(path: &Path) -> Result<CatalogAuditSnapshot> {
                     CatalogBlob {
                         hash,
                         size_bytes: size.expect("validated"),
+                        marked_at_ms,
+                        referenced: referenced.expect("validated"),
                     },
                 );
             } else {
@@ -261,9 +316,6 @@ pub fn inspect_catalog_for_audit(path: &Path) -> Result<CatalogAuditSnapshot> {
             }
         }
     }
-    connection
-        .execute_batch(AUDIT_COMMIT_SQL)
-        .wrap_err("finish audit read transaction")?;
     Ok(CatalogAuditSnapshot {
         blob_rows_seen,
         gc_candidates,
@@ -536,6 +588,8 @@ fn normalize_sql(sql: &str) -> String {
 }
 const INSERT_BLOB_SQL: &str = include_str!("catalog/sql/insert_blob.sql");
 const READ_USER_VERSION_SQL: &str = include_str!("catalog/sql/read_user_version.sql");
+const CONFIRM_WAL_MODE_SQL: &str = include_str!("catalog/sql/confirm_wal_mode.sql");
+const RESURRECT_IMPORTED_BLOB_SQL: &str = include_str!("catalog/sql/resurrect_imported_blob.sql");
 const SCHEMA_V1_SQL: &str = include_str!("catalog/sql/schema_v1.sql");
 const SELECT_BLOB_SIZE_SQL: &str = include_str!("catalog/sql/select_blob_size.sql");
 const SELECT_LIVE_MATERIALIZATION_ENTRIES_SQL: &str =
@@ -557,6 +611,147 @@ impl Clock for SystemClock {
             .map(|duration| duration.as_millis().try_into().unwrap_or(i64::MAX))
             .unwrap_or(0)
     }
+}
+
+pub struct GcCatalog {
+    connection: Connection,
+}
+
+pub struct GcTransaction<'connection> {
+    transaction: Transaction<'connection>,
+}
+
+impl GcCatalog {
+    pub fn open_existing_for_gc(path: &Path) -> Result<Self> {
+        let metadata = fs::symlink_metadata(path)
+            .wrap_err_with(|| format!("stat catalog database for garbage collection {:?}", path))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!(
+                "catalog database must be an existing regular file, not a symlink: {:?}",
+                path
+            );
+        }
+
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .wrap_err_with(|| {
+            format!("open existing catalog database for garbage collection {path:?}")
+        })?;
+        connection
+            .busy_timeout(Duration::from_secs(1))
+            .wrap_err("set garbage collection SQLite busy timeout")?;
+
+        let version: i64 = connection
+            .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
+            .wrap_err("read catalog schema version for garbage collection")?;
+        if version != CURRENT_SCHEMA_VERSION {
+            bail!(
+                "catalog schema version {version} is unsupported; expected {CURRENT_SCHEMA_VERSION}"
+            );
+        }
+
+        let journal_mode: String = connection
+            .query_row(READ_JOURNAL_MODE_SQL, [], |row| row.get(0))
+            .wrap_err("read catalog journal mode for garbage collection")?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            bail!(
+                "garbage collection requires an existing WAL-mode catalog; found journal_mode={journal_mode}"
+            );
+        }
+        connection
+            .execute_batch(GC_CONNECTION_PRAGMAS_SQL)
+            .wrap_err("enable garbage collection catalog PRAGMAs")?;
+        let confirmed_mode: String = connection
+            .query_row(CONFIRM_WAL_MODE_SQL, [], |row| row.get(0))
+            .wrap_err("confirm WAL journal mode for garbage collection")?;
+        if !confirmed_mode.eq_ignore_ascii_case("wal") {
+            bail!("catalog did not remain in WAL mode for garbage collection");
+        }
+
+        Ok(Self { connection })
+    }
+
+    pub fn begin_immediate(&mut self) -> Result<GcTransaction<'_>> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .wrap_err("begin immediate garbage collection transaction")?;
+        Ok(GcTransaction { transaction })
+    }
+}
+
+impl GcTransaction<'_> {
+    pub fn inspect_and_snapshot(&self) -> Result<CatalogAuditSnapshot> {
+        let version: i64 = self
+            .transaction
+            .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
+            .wrap_err("re-read catalog schema version inside garbage collection transaction")?;
+        if version != CURRENT_SCHEMA_VERSION {
+            bail!("catalog schema version changed to {version}; expected {CURRENT_SCHEMA_VERSION}");
+        }
+        inspect_catalog_connection(&self.transaction, GC_SNAPSHOT_SQL)
+    }
+
+    pub fn stage_mark(&self, blob: &CatalogBlob, marked_at_ms: i64) -> Result<()> {
+        let affected = self
+            .transaction
+            .execute(
+                GC_MARK_SQL,
+                params![
+                    blob.hash.as_str(),
+                    sqlite_u64(blob.size_bytes, "blob size")?,
+                    marked_at_ms
+                ],
+            )
+            .wrap_err_with(|| format!("mark unreachable blob {}", blob.hash))?;
+        require_one_gc_row("mark", blob, affected)
+    }
+
+    pub fn stage_resurrection(&self, blob: &CatalogBlob) -> Result<()> {
+        let affected = self
+            .transaction
+            .execute(
+                GC_RESURRECT_SQL,
+                params![
+                    blob.hash.as_str(),
+                    sqlite_u64(blob.size_bytes, "blob size")?
+                ],
+            )
+            .wrap_err_with(|| format!("resurrect referenced blob {}", blob.hash))?;
+        require_one_gc_row("resurrect", blob, affected)
+    }
+
+    pub fn stage_sweep(&self, blob: &CatalogBlob) -> Result<()> {
+        let affected = self
+            .transaction
+            .execute(
+                GC_SWEEP_SQL,
+                params![
+                    blob.hash.as_str(),
+                    sqlite_u64(blob.size_bytes, "blob size")?
+                ],
+            )
+            .wrap_err_with(|| format!("delete swept blob row {}", blob.hash))?;
+        require_one_gc_row("sweep", blob, affected)
+    }
+
+    pub fn commit(self) -> Result<()> {
+        self.transaction
+            .commit()
+            .wrap_err("commit garbage collection transaction")
+    }
+}
+
+fn require_one_gc_row(operation: &str, blob: &CatalogBlob, affected: usize) -> Result<()> {
+    if affected != 1 {
+        bail!(
+            "garbage collection {operation} for {} expected one matching row, affected {affected}",
+            blob.hash
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -645,21 +840,35 @@ impl Catalog {
         let blob_outcome = if inserted_blobs == 1 {
             BlobRecordOutcome::Inserted
         } else {
-            let existing_size: i64 = tx
-                .query_row(SELECT_BLOB_SIZE_SQL, params![blob.hash.as_str()], |row| {
-                    row.get(0)
-                })
-                .wrap_err("read existing blob record")?;
-            if existing_size != sqlite_u64(blob.size_bytes, "blob size")? {
-                bail!(
-                    "catalog blob {} exists with size {}, imported size {}",
-                    blob.hash,
-                    existing_size,
-                    blob.size_bytes
-                );
-            }
             BlobRecordOutcome::AlreadyPresent
         };
+        let expected_size = sqlite_u64(blob.size_bytes, "blob size")?;
+        let existing_size: i64 = tx
+            .query_row(SELECT_BLOB_SIZE_SQL, params![blob.hash.as_str()], |row| {
+                row.get(0)
+            })
+            .wrap_err("read existing blob record")?;
+        if existing_size != expected_size {
+            bail!(
+                "catalog blob {} exists with size {}, imported size {}",
+                blob.hash,
+                existing_size,
+                blob.size_bytes
+            );
+        }
+        let resurrected = tx
+            .execute(
+                RESURRECT_IMPORTED_BLOB_SQL,
+                params![blob.hash.as_str(), expected_size],
+            )
+            .wrap_err("clear imported blob deletion mark")?;
+        if resurrected != 1 {
+            bail!(
+                "expected one matching blob row while resurrecting {}, updated {}",
+                blob.hash,
+                resurrected
+            );
+        }
 
         let existing_source: Option<i64> = tx
             .query_row(

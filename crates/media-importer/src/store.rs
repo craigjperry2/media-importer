@@ -1,13 +1,17 @@
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
 use std::num::NonZeroUsize;
 use std::path::Path;
 
 use color_eyre::Result;
-use color_eyre::eyre::{WrapErr, bail};
+use color_eyre::eyre::{WrapErr, bail, eyre};
 use tracing::debug;
 
 use crate::hashing::{hash_file, hash_reader_to_writer};
+use crate::integrity::{IntegrityFinding, push_finding};
 use crate::paths::{BlobHash, StagingFileName, StoreRoot};
 
 pub struct Store {
@@ -31,6 +35,27 @@ pub enum StoreOutcome {
 pub enum BlobPresence {
     Missing,
     Present,
+}
+
+#[derive(Debug)]
+pub struct CasInspection {
+    pub valid_blobs: BTreeSet<BlobHash>,
+    pub findings: Vec<IntegrityFinding>,
+    pub complete: bool,
+}
+
+pub struct OpenedBlob {
+    pub file: File,
+    pub identity: BlobFileIdentity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlobFileIdentity {
+    pub len: u64,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
 }
 
 impl Store {
@@ -196,6 +221,320 @@ impl Store {
     }
 }
 
+pub fn inspect_cas(root: &StoreRoot) -> Result<CasInspection> {
+    let mut inspection = CasInspection {
+        valid_blobs: BTreeSet::new(),
+        findings: Vec::new(),
+        complete: true,
+    };
+    let blobs = root.blobs_dir();
+    if let Err(error) = walk_cas(&blobs, &blobs, &mut inspection, true) {
+        inspection.complete = false;
+        push_finding(
+            &mut inspection.findings,
+            IntegrityFinding::for_path(
+                "CAS_IO_ERROR",
+                Path::new("blobs"),
+                format!("reason=enumeration-failed context={error}"),
+            ),
+        )?;
+    }
+    Ok(inspection)
+}
+
+pub fn open_blob_no_follow(root: &StoreRoot, hash: &BlobHash) -> std::io::Result<OpenedBlob> {
+    let path = root.blob_path(hash);
+    let file = safe_open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::other("opened blob is not a regular file"));
+    }
+    Ok(OpenedBlob {
+        file,
+        identity: BlobFileIdentity::from_metadata(&metadata),
+    })
+}
+
+pub fn remove_revalidated_blob(
+    root: &StoreRoot,
+    hash: &BlobHash,
+    expected: &BlobFileIdentity,
+) -> Result<()> {
+    let path = root.blob_path(hash);
+    let metadata =
+        fs::symlink_metadata(&path).wrap_err_with(|| format!("revalidate GC candidate {hash}"))?;
+    if !metadata.is_file() {
+        bail!("GC candidate {hash} is no longer a regular file");
+    }
+    let actual = BlobFileIdentity::from_metadata(&metadata);
+    if &actual != expected {
+        bail!("GC candidate {hash} changed after preflight");
+    }
+    fs::remove_file(&path).wrap_err_with(|| format!("remove GC candidate {hash}"))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| eyre!("GC candidate {hash} has no containing directory"))?;
+    sync_directory(parent)
+        .wrap_err_with(|| format!("sync containing directory after removing GC candidate {hash}"))
+}
+
+pub fn sync_nearest_existing_blob_parent(root: &StoreRoot, hash: &BlobHash) -> Result<()> {
+    let path = root.blob_path(hash);
+    let mut current = path
+        .parent()
+        .ok_or_else(|| eyre!("GC candidate {hash} has no containing directory"))?;
+    loop {
+        match fs::symlink_metadata(current) {
+            Ok(metadata) if metadata.is_dir() => {
+                return sync_directory(current).wrap_err_with(|| {
+                    format!("sync nearest existing directory for absent GC candidate {hash}")
+                });
+            }
+            Ok(_) => bail!(
+                "canonical parent for absent GC candidate {hash} is not a directory: {:?}",
+                current
+            ),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                current = current.parent().ok_or_else(|| {
+                    eyre!("no existing canonical parent for absent GC candidate {hash}")
+                })?;
+                if !current.starts_with(root.path()) {
+                    bail!("absent GC candidate {hash} escaped the validated store root");
+                }
+            }
+            Err(error) => {
+                return Err(error).wrap_err_with(|| {
+                    format!("stat canonical parent for absent GC candidate {hash}")
+                });
+            }
+        }
+    }
+}
+
+impl BlobFileIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self {
+                len: metadata.len(),
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            }
+        }
+        #[cfg(not(unix))]
+        Self {
+            len: metadata.len(),
+        }
+    }
+}
+
+fn walk_cas(
+    root: &Path,
+    dir: &Path,
+    inspection: &mut CasInspection,
+    ancestors_valid: bool,
+) -> Result<()> {
+    let entries =
+        fs::read_dir(dir).wrap_err_with(|| format!("enumerate blobs directory {dir:?}"))?;
+    let mut sorted_entries = Vec::new();
+    for entry in entries {
+        sorted_entries
+            .try_reserve(1)
+            .map_err(|error| eyre!("reserve CAS directory entries: {error}"))?;
+        sorted_entries.push(entry.wrap_err("enumerate CAS entry")?);
+    }
+    sorted_entries.sort_by(|left, right| compare_os_str(&left.file_name(), &right.file_name()));
+    for entry in sorted_entries {
+        let path = entry.path();
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                inspection.complete = false;
+                push_finding(
+                    &mut inspection.findings,
+                    IntegrityFinding::for_path("CAS_IO_ERROR", relative, "reason=stat-failed"),
+                )?;
+                continue;
+            }
+        };
+        let mut components = Vec::new();
+        components
+            .try_reserve(relative.components().count())
+            .map_err(|error| eyre!("reserve CAS path components: {error}"))?;
+        components.extend(relative.components().map(|component| component.as_os_str()));
+        let kind = EntryKind::from_metadata(&metadata);
+        match classify_cas_entry(&components, kind, ancestors_valid) {
+            CasClassification::ValidDirectory => {
+                if let Err(error) = walk_cas(root, &path, inspection, true) {
+                    inspection.complete = false;
+                    push_finding(
+                        &mut inspection.findings,
+                        IntegrityFinding::for_path(
+                            "CAS_IO_ERROR",
+                            relative,
+                            format!("reason=enumeration-failed context={error}"),
+                        ),
+                    )?;
+                }
+            }
+            CasClassification::Invalid(reason) => {
+                push_finding(
+                    &mut inspection.findings,
+                    IntegrityFinding::for_path(
+                        "INVALID_CAS_ENTRY",
+                        relative,
+                        format!("reason={reason}"),
+                    ),
+                )?;
+                if metadata.is_dir()
+                    && let Err(error) = walk_cas(root, &path, inspection, false)
+                {
+                    inspection.complete = false;
+                    push_finding(
+                        &mut inspection.findings,
+                        IntegrityFinding::for_path(
+                            "CAS_IO_ERROR",
+                            relative,
+                            format!("reason=enumeration-failed context={error}"),
+                        ),
+                    )?;
+                }
+            }
+            CasClassification::ValidBlob(hash) => {
+                inspection.valid_blobs.insert(hash);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+impl EntryKind {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        let kind = metadata.file_type();
+        if kind.is_symlink() {
+            Self::Symlink
+        } else if kind.is_dir() {
+            Self::Directory
+        } else if kind.is_file() {
+            Self::File
+        } else {
+            Self::Other
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CasClassification {
+    ValidDirectory,
+    ValidBlob(BlobHash),
+    Invalid(&'static str),
+}
+
+fn classify_cas_entry(
+    components: &[&OsStr],
+    kind: EntryKind,
+    ancestors_valid: bool,
+) -> CasClassification {
+    if kind == EntryKind::Symlink {
+        return CasClassification::Invalid("symlink");
+    }
+    if kind == EntryKind::Other {
+        return CasClassification::Invalid("non-regular");
+    }
+    if !ancestors_valid {
+        return CasClassification::Invalid("malformed-ancestor");
+    }
+    match kind {
+        EntryKind::Directory
+            if components.len() <= 2 && components.iter().all(|value| valid_shard(value)) =>
+        {
+            CasClassification::ValidDirectory
+        }
+        EntryKind::Directory if components.len() >= 3 => {
+            CasClassification::Invalid("directory-at-blob-depth")
+        }
+        EntryKind::Directory => CasClassification::Invalid("invalid-shard"),
+        EntryKind::File if components.len() != 3 => {
+            CasClassification::Invalid("file-at-invalid-depth")
+        }
+        EntryKind::File => {
+            if !valid_shard(components[0]) || !valid_shard(components[1]) {
+                return CasClassification::Invalid("invalid-shard");
+            }
+            let Some(name) = components[2].to_str() else {
+                return CasClassification::Invalid("invalid-blob-name");
+            };
+            let Ok(hash) = BlobHash::new(name.to_owned()) else {
+                return CasClassification::Invalid("invalid-blob-name");
+            };
+            if components[0].to_str() != Some(&hash.as_str()[0..2])
+                || components[1].to_str() != Some(&hash.as_str()[2..4])
+            {
+                CasClassification::Invalid("shard-mismatch")
+            } else {
+                CasClassification::ValidBlob(hash)
+            }
+        }
+        EntryKind::Symlink | EntryKind::Other => unreachable!("handled above"),
+    }
+}
+
+fn valid_shard(value: &OsStr) -> bool {
+    value.to_str().is_some_and(|text| {
+        text.len() == 2
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
+#[cfg(unix)]
+fn compare_os_str(left: &OsStr, right: &OsStr) -> Ordering {
+    use std::os::unix::ffi::OsStrExt;
+    left.as_bytes().cmp(right.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn compare_os_str(left: &OsStr, right: &OsStr) -> Ordering {
+    left.to_string_lossy()
+        .as_bytes()
+        .cmp(right.to_string_lossy().as_bytes())
+}
+
+#[cfg(unix)]
+fn safe_open(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn safe_open(path: &Path) -> std::io::Result<File> {
+    File::open(path)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
 fn verify_existing_blob(path: &Path, expected_size: u64) -> Result<()> {
     let metadata = fs::metadata(path).wrap_err_with(|| format!("stat existing blob {:?}", path))?;
     if metadata.len() != expected_size {
@@ -232,4 +571,49 @@ fn set_readonly_blob(path: &Path) -> Result<()> {
     permissions.set_readonly(true);
     fs::set_permissions(path, permissions)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn pure_classifier_covers_layout_depth_kind_and_shards() {
+        let valid = [OsStr::new("01"), OsStr::new("23"), OsStr::new(HASH)];
+        assert!(matches!(
+            classify_cas_entry(&valid, EntryKind::File, true),
+            CasClassification::ValidBlob(_)
+        ));
+        assert_eq!(
+            classify_cas_entry(&valid[..1], EntryKind::Directory, true),
+            CasClassification::ValidDirectory
+        );
+        assert_eq!(
+            classify_cas_entry(&valid[..1], EntryKind::File, true),
+            CasClassification::Invalid("file-at-invalid-depth")
+        );
+        assert_eq!(
+            classify_cas_entry(&valid, EntryKind::Directory, true),
+            CasClassification::Invalid("directory-at-blob-depth")
+        );
+        assert_eq!(
+            classify_cas_entry(&valid, EntryKind::Symlink, true),
+            CasClassification::Invalid("symlink")
+        );
+        assert_eq!(
+            classify_cas_entry(&[OsStr::new("AA")], EntryKind::Directory, true),
+            CasClassification::Invalid("invalid-shard")
+        );
+        assert_eq!(
+            classify_cas_entry(&valid, EntryKind::File, false),
+            CasClassification::Invalid("malformed-ancestor")
+        );
+        let mismatch = [OsStr::new("ff"), OsStr::new("23"), OsStr::new(HASH)];
+        assert_eq!(
+            classify_cas_entry(&mismatch, EntryKind::File, true),
+            CasClassification::Invalid("shard-mismatch")
+        );
+    }
 }

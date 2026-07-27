@@ -63,22 +63,44 @@ pub struct AuditOptions {
     pub chunk_size: NonZeroUsize,
 }
 
+#[derive(Clone, Debug)]
+pub struct GcConfig {
+    pub store_root: StoreRoot,
+    pub db_path: PathBuf,
+    pub dry_run: bool,
+    pub chunk_size: NonZeroUsize,
+}
+
+#[derive(Clone, Debug)]
+pub struct GcOptions {
+    pub store: PathBuf,
+    pub db: Option<PathBuf>,
+    pub dry_run: bool,
+    pub chunk_size: NonZeroUsize,
+}
+
 impl AuditConfig {
     pub fn from_options(options: AuditOptions) -> Result<Self> {
         let store_root = StoreRoot::validate_existing(&options.store)?;
         let db_path = options.db.unwrap_or_else(|| store_root.default_db_path());
-        let metadata = std::fs::symlink_metadata(&db_path).map_err(|error| {
-            color_eyre::eyre::eyre!("stat catalog database {:?}: {error}", db_path)
-        })?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!(
-                "catalog database must be an existing regular file, not a symlink: {:?}",
-                db_path
-            );
-        }
+        validate_existing_catalog(&db_path)?;
         Ok(Self {
             store_root,
             db_path,
+            chunk_size: options.chunk_size,
+        })
+    }
+}
+
+impl GcConfig {
+    pub fn from_options(options: GcOptions) -> Result<Self> {
+        let store_root = StoreRoot::validate_existing(&options.store)?;
+        let db_path = options.db.unwrap_or_else(|| store_root.default_db_path());
+        validate_existing_catalog(&db_path)?;
+        Ok(Self {
+            store_root,
+            db_path,
+            dry_run: options.dry_run,
             chunk_size: options.chunk_size,
         })
     }
@@ -127,4 +149,16 @@ impl BuildTreeConfig {
             hash_digits: options.hash_digits,
         })
     }
+}
+
+fn validate_existing_catalog(path: &std::path::Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| color_eyre::eyre::eyre!("stat catalog database {:?}: {error}", path))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "catalog database must be an existing regular file, not a symlink: {:?}",
+            path
+        );
+    }
+    Ok(())
 }

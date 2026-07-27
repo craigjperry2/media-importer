@@ -20,14 +20,14 @@ fn import(temp: &TempDir) {
 }
 
 #[test]
-fn help_exposes_audit_but_not_gc() {
+fn help_exposes_all_milestone_four_commands() {
     Command::cargo_bin("media-importer")
         .unwrap()
         .arg("--help")
         .assert()
         .success()
         .stdout(predicate::str::contains("audit"))
-        .stdout(predicate::str::contains("gc").not());
+        .stdout(predicate::str::contains("gc"));
 }
 
 #[test]
