@@ -2,10 +2,15 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 use assert_cmd::Command;
 use assert_fs::TempDir;
 use assert_fs::prelude::*;
+use media_importer::catalog::Clock;
+use media_importer::config::{DEFAULT_CHUNK_SIZE, ImportConfig, ImportOptions};
+use media_importer::ingest::import_source_with_clock;
 use predicates::prelude::*;
 use rusqlite::{Connection, params};
 
@@ -75,11 +80,45 @@ fn real_import_creates_cas_and_catalog_then_rerun_reuses_blobs() {
         .stdout(predicate::str::contains("Files seen: 3"))
         .stdout(predicate::str::contains("Blobs created: 0"))
         .stdout(predicate::str::contains("Blobs reused: 3"))
+        .stdout(predicate::str::contains("Files skipped: 3"))
+        .stdout(predicate::str::contains("Bytes skipped: 14"))
+        .stdout(predicate::str::contains("Files hashed: 0"))
         .stdout(predicate::str::contains("Source records inserted: 0"))
         .stdout(predicate::str::contains("Source records updated: 3"));
 
     assert_source_row(store.path(), "a.txt", 2, "same");
     assert_catalog_counts(store.path(), 2, 3);
+}
+
+#[test]
+fn unchanged_repeat_import_skips_source_reads_and_refreshes_observation() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+    let store = temp.child("store");
+
+    run_import(source.path(), store.path()).success();
+    let before = source_observation_state(store.path(), "a.txt");
+    let config = import_config(source.path(), store.path());
+    let report =
+        import_source_with_clock(config, &FixedClock(9_999_999_999_999)).expect("repeat import");
+
+    assert_eq!(report.files_skipped, 1);
+    assert_eq!(report.bytes_skipped, 5);
+    assert_eq!(report.files_hashed, 0);
+    assert_eq!(report.bytes_hashed, 0, "skip must not read source content");
+    assert_eq!(
+        source_observation_state(store.path(), "a.txt"),
+        (9_999_999_999_999, 2)
+    );
+    assert!(
+        before.0 < 9_999_999_999_999,
+        "fixed clock must prove last_seen refresh"
+    );
 }
 
 #[test]
@@ -94,6 +133,7 @@ fn changed_source_path_updates_catalog_observation() {
     let store = temp.child("store");
 
     run_import(source.path(), store.path()).success();
+    thread::sleep(Duration::from_millis(5));
     source
         .child("photo.txt")
         .write_str("new")
@@ -102,6 +142,210 @@ fn changed_source_path_updates_catalog_observation() {
 
     assert_catalog_counts(store.path(), 2, 1);
     assert_source_row(store.path(), "photo.txt", 2, "new");
+}
+
+#[test]
+fn changed_source_size_forces_content_hashing() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source.child("a.txt").write_str("old").expect("write file");
+    let store = temp.child("store");
+
+    run_import(source.path(), store.path()).success();
+    source
+        .child("a.txt")
+        .write_str("larger")
+        .expect("change size");
+    run_import(source.path(), store.path())
+        .success()
+        .stdout(predicate::str::contains("Files skipped: 0"))
+        .stdout(predicate::str::contains("Files hashed: 1"))
+        .stdout(predicate::str::contains("Bytes hashed: 6"));
+    assert_source_row(store.path(), "a.txt", 2, "larger");
+}
+
+#[test]
+fn unavailable_catalog_mtime_forces_content_hashing() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+    let store = temp.child("store");
+
+    run_import(source.path(), store.path()).success();
+    let connection = Connection::open(store.child("catalog.sqlite").path()).expect("open db");
+    connection
+        .execute("UPDATE source_files SET modified_at_ms = NULL", [])
+        .expect("clear advisory mtime");
+    drop(connection);
+
+    run_import(source.path(), store.path())
+        .success()
+        .stdout(predicate::str::contains("Files skipped: 0"))
+        .stdout(predicate::str::contains("Files hashed: 1"))
+        .stdout(predicate::str::contains("Bytes hashed: 5"));
+}
+
+#[test]
+fn no_metadata_skip_forces_content_hashing_of_an_unchanged_file() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+    let store = temp.child("store");
+
+    run_import(source.path(), store.path()).success();
+    run_import_args(source.path(), store.path(), &["--no-metadata-skip"])
+        .success()
+        .stdout(predicate::str::contains("Files skipped: 0"))
+        .stdout(predicate::str::contains("Files hashed: 1"))
+        .stdout(predicate::str::contains("Bytes hashed: 5"));
+    assert_source_row(store.path(), "a.txt", 2, "alpha");
+}
+
+#[test]
+fn changed_same_size_content_is_hashed_after_mtime_changes() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+    let store = temp.child("store");
+
+    run_import(source.path(), store.path()).success();
+    thread::sleep(Duration::from_millis(5));
+    source
+        .child("a.txt")
+        .write_str("bravo")
+        .expect("replace file");
+    run_import(source.path(), store.path())
+        .success()
+        .stdout(predicate::str::contains("Files skipped: 0"))
+        .stdout(predicate::str::contains("Files hashed: 1"));
+    assert_source_row(store.path(), "a.txt", 2, "bravo");
+}
+
+#[test]
+fn missing_cataloged_cas_blob_falls_back_to_hash_and_recovers() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+    let store = temp.child("store");
+
+    run_import(source.path(), store.path()).success();
+    fs::remove_file(blob_path(store.path(), "alpha")).expect("remove CAS blob");
+    run_import(source.path(), store.path())
+        .success()
+        .stdout(predicate::str::contains("Files skipped: 0"))
+        .stdout(predicate::str::contains("Files hashed: 1"))
+        .stdout(predicate::str::contains("Blobs created: 1"));
+    assert_blob(store.path(), "alpha", true);
+}
+
+#[test]
+fn wrong_size_cataloged_cas_blob_is_hashed_then_fails_safely() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+    let store = temp.child("store");
+
+    run_import(source.path(), store.path()).success();
+    let blob = blob_path(store.path(), "alpha");
+    fs::remove_file(&blob).expect("remove valid blob");
+    fs::write(&blob, "bad").expect("install wrong-size blob");
+
+    run_import(source.path(), store.path())
+        .failure()
+        .stderr(predicate::str::contains(
+            "CAS blob exists with unexpected size",
+        ));
+    assert_source_row(store.path(), "a.txt", 1, "alpha");
+}
+
+#[cfg(unix)]
+#[test]
+fn source_root_alias_reuses_one_identity_without_hashing() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+    let alias = temp.child("source-alias");
+    symlink(source.path(), alias.path()).expect("create source alias");
+    let store = temp.child("store");
+
+    run_import(source.path(), store.path()).success();
+    run_import(alias.path(), store.path())
+        .success()
+        .stdout(predicate::str::contains("Files skipped: 1"))
+        .stdout(predicate::str::contains("Files hashed: 0"));
+
+    let connection = Connection::open(store.child("catalog.sqlite").path()).expect("open db");
+    let (rows, seen_count): (i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*), MAX(seen_count) FROM source_files WHERE relative_path = 'a.txt'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read canonical source identity");
+    assert_eq!(rows, 1);
+    assert_eq!(seen_count, 2);
+}
+
+#[test]
+fn metadata_skip_resurrects_a_marked_blob_without_hashing() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+    let store = temp.child("store");
+
+    run_import(source.path(), store.path()).success();
+    let hash = blake3::hash(b"alpha").to_hex().to_string();
+    let connection = Connection::open(store.child("catalog.sqlite").path()).expect("open db");
+    connection
+        .execute(
+            "UPDATE blobs SET deleted_at_ms = 1 WHERE hash = ?1",
+            [&hash],
+        )
+        .expect("mark blob");
+    drop(connection);
+
+    run_import(source.path(), store.path())
+        .success()
+        .stdout(predicate::str::contains("Files skipped: 1"))
+        .stdout(predicate::str::contains("Files hashed: 0"));
+    let connection = Connection::open(store.child("catalog.sqlite").path()).expect("open db");
+    let mark: Option<i64> = connection
+        .query_row(
+            "SELECT deleted_at_ms FROM blobs WHERE hash = ?1",
+            [&hash],
+            |row| row.get(0),
+        )
+        .expect("read mark");
+    assert_eq!(mark, None);
 }
 
 #[test]
@@ -146,6 +390,10 @@ fn dry_run_existing_store_does_not_mutate_catalog_or_staging() {
     run_import_args(source.path(), store.path(), &["--dry-run"])
         .success()
         .stdout(predicate::str::contains("Blobs that would be reused: 1"))
+        .stdout(predicate::str::contains(
+            "Files that would skip content reads: 1",
+        ))
+        .stdout(predicate::str::contains("Files that would be hashed: 0"))
         .stdout(predicate::str::contains(
             "Source records that would be updated: 1",
         ));
@@ -442,6 +690,37 @@ fn run_import_args(source: &Path, store: &Path, extra: &[&str]) -> assert_cmd::a
         .arg(source)
         .args(extra)
         .assert()
+}
+
+struct FixedClock(i64);
+
+impl Clock for FixedClock {
+    fn now_ms(&self) -> i64 {
+        self.0
+    }
+}
+
+fn import_config(source: &Path, store: &Path) -> ImportConfig {
+    ImportConfig::from_options(ImportOptions {
+        store: store.to_path_buf(),
+        source: source.to_path_buf(),
+        db: None,
+        dry_run: false,
+        metadata_skip: true,
+        chunk_size: DEFAULT_CHUNK_SIZE,
+    })
+    .expect("import config")
+}
+
+fn source_observation_state(store: &Path, relative_path: &str) -> (i64, i64) {
+    let connection = Connection::open(store.join("catalog.sqlite")).expect("open db");
+    connection
+        .query_row(
+            "SELECT last_seen_at_ms, seen_count FROM source_files WHERE relative_path = ?1",
+            params![relative_path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("source observation")
 }
 
 fn run_build_tree(store: &Path, browse: &Path, extra: &[&str]) -> assert_cmd::assert::Assert {

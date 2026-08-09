@@ -19,6 +19,7 @@ pub struct ImportConfig {
     pub db_path: PathBuf,
     pub source_root: SourceRoot,
     pub dry_run: bool,
+    pub metadata_skip: bool,
     pub chunk_size: NonZeroUsize,
 }
 
@@ -28,6 +29,7 @@ pub struct ImportOptions {
     pub source: PathBuf,
     pub db: Option<PathBuf>,
     pub dry_run: bool,
+    pub metadata_skip: bool,
     pub chunk_size: NonZeroUsize,
 }
 
@@ -125,6 +127,7 @@ impl ImportConfig {
             db_path,
             source_root,
             dry_run: options.dry_run,
+            metadata_skip: options.metadata_skip,
             chunk_size: options.chunk_size,
         })
     }

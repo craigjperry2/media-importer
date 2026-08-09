@@ -37,6 +37,15 @@ pub enum BlobPresence {
     Present,
 }
 
+/// Metadata-only inspection result used by idempotent import.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CasMetadataCheck {
+    Present,
+    Missing,
+    SizeMismatch,
+    Invalid,
+}
+
 #[derive(Debug)]
 pub struct CasInspection {
     pub valid_blobs: BTreeSet<BlobHash>,
@@ -179,6 +188,36 @@ impl Store {
         }
         verify_existing_blob(&path, size_bytes)?;
         Ok(BlobPresence::Present)
+    }
+
+    /// Check a cataloged CAS entry without following the final path component
+    /// and without reading blob content.
+    pub fn check_blob_metadata(
+        &self,
+        hash: &BlobHash,
+        expected_size: u64,
+    ) -> Result<CasMetadataCheck> {
+        let path = self.root.blob_path(hash);
+        let file = match safe_open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Ok(CasMetadataCheck::Missing);
+            }
+            Err(error) => {
+                return Err(error).wrap_err_with(|| format!("open CAS blob metadata {path:?}"));
+            }
+        };
+        let metadata = file
+            .metadata()
+            .wrap_err_with(|| format!("read CAS blob metadata {path:?}"))?;
+        if !metadata.is_file() {
+            return Ok(CasMetadataCheck::Invalid);
+        }
+        Ok(if metadata.len() == expected_size {
+            CasMetadataCheck::Present
+        } else {
+            CasMetadataCheck::SizeMismatch
+        })
     }
 
     pub fn hash_file_read_only(

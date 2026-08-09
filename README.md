@@ -19,7 +19,8 @@ media-importer import \
   --source SOURCE_ROOT \
   [--db DB_PATH] \
   [--dry-run] \
-  [--chunk-size BYTES]
+  [--chunk-size BYTES] \
+  [--no-metadata-skip]
 ```
 
 Build a browse tree of links from live catalog entries:
@@ -53,6 +54,12 @@ media-importer gc \
 ```
 
 When `--db` is omitted, commands use `STORE_ROOT/catalog.sqlite`.
+
+`import` reuses a previously cataloged blob without reading source content when
+the canonical source path, size, and available modified time match. This is an
+optimization that relies on the source filesystem faithfully updating modified
+times when content changes; use `--no-metadata-skip` to hash every regular
+source file when that assumption is unsuitable.
 
 ### Single-node command coordination
 

@@ -67,6 +67,9 @@ struct ImportArgs {
     db: Option<PathBuf>,
     #[arg(long)]
     dry_run: bool,
+    /// Hash every source file instead of reusing unchanged source metadata.
+    #[arg(long)]
+    no_metadata_skip: bool,
     #[arg(long, default_value_t = DEFAULT_CHUNK_SIZE)]
     chunk_size: NonZeroUsize,
 }
@@ -109,6 +112,7 @@ impl TryFrom<Cli> for CliCommand {
                     source: args.source,
                     db: args.db,
                     dry_run: args.dry_run,
+                    metadata_skip: !args.no_metadata_skip,
                     chunk_size: args.chunk_size,
                 })?;
                 Ok(Self::Import(config))
@@ -281,6 +285,16 @@ pub fn render_import_report(report: &ImportReport) {
         );
         println!("Bytes seen: {}", report.bytes_seen);
         println!("Bytes that would be written: {}", report.bytes_written);
+        println!(
+            "Files that would skip content reads: {}",
+            report.files_skipped
+        );
+        println!(
+            "Bytes that would skip content reads: {}",
+            report.bytes_skipped
+        );
+        println!("Files that would be hashed: {}", report.files_hashed);
+        println!("Bytes that would be hashed: {}", report.bytes_hashed);
     } else {
         println!("Import complete");
         println!("Files seen: {}", report.files_seen);
@@ -293,6 +307,10 @@ pub fn render_import_report(report: &ImportReport) {
         println!("Source records updated: {}", report.source_records_updated);
         println!("Bytes seen: {}", report.bytes_seen);
         println!("Bytes written: {}", report.bytes_written);
+        println!("Files skipped: {}", report.files_skipped);
+        println!("Bytes skipped: {}", report.bytes_skipped);
+        println!("Files hashed: {}", report.files_hashed);
+        println!("Bytes hashed: {}", report.bytes_hashed);
     }
 }
 

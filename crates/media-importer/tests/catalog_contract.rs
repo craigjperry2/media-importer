@@ -1,5 +1,6 @@
 use assert_fs::TempDir;
-use media_importer::catalog::Catalog;
+use media_importer::catalog::{BlobRecord, Catalog, SourceObservation};
+use media_importer::paths::{BlobHash, SourceRelativePath};
 use rusqlite::{Connection, Error, ErrorCode, params};
 
 fn create_real_catalog(temp: &TempDir) -> Connection {
@@ -89,6 +90,61 @@ fn real_catalog_constraints_reject_invalid_identity_values() {
         insert_source(&connection, "/source", "duplicate.txt", &valid_hash),
         "source_files must reject duplicate (source_root, relative_path) identity",
     );
+}
+
+#[test]
+fn failed_known_source_resurrection_rolls_back_observation_update() {
+    let temp = TempDir::new().expect("temporary catalog directory");
+    let path = temp.path().join("catalog.sqlite");
+    let mut catalog = Catalog::open_or_initialize(&path).expect("initialize catalog");
+    let hash = BlobHash::new("a".repeat(64)).expect("valid hash");
+    let relative_path = SourceRelativePath::from_catalog_text("photo.jpg").expect("relative path");
+    let initial = SourceObservation {
+        source_root: "/source".into(),
+        relative_path: relative_path.clone(),
+        blob_hash: hash.clone(),
+        size_bytes: 5,
+        modified_at_ms: Some(10),
+        observed_at_ms: 100,
+    };
+    catalog
+        .record_imported_file(
+            BlobRecord {
+                hash: hash.clone(),
+                size_bytes: 5,
+                created_at_ms: 100,
+            },
+            initial,
+        )
+        .expect("record source");
+
+    let failed = catalog.observe_known_source_file(
+        SourceObservation {
+            source_root: "/source".into(),
+            relative_path,
+            blob_hash: hash,
+            size_bytes: 5,
+            modified_at_ms: Some(20),
+            observed_at_ms: 200,
+        },
+        6,
+    );
+    assert!(
+        failed.is_err(),
+        "wrong expected size must reject resurrection"
+    );
+    drop(catalog);
+
+    let connection = Connection::open(path).expect("inspect catalog");
+    let state: (Option<i64>, i64, i64) = connection
+        .query_row(
+            "SELECT modified_at_ms, last_seen_at_ms, seen_count
+             FROM source_files WHERE source_root = '/source' AND relative_path = 'photo.jpg'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read unchanged observation");
+    assert_eq!(state, (Some(10), 100, 1));
 }
 
 fn table_columns(connection: &Connection, table: &str) -> Vec<(String, String)> {

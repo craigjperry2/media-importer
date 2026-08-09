@@ -675,6 +675,11 @@ const SELECT_LIVE_MATERIALIZATION_ENTRIES_SQL: &str =
     include_str!("catalog/sql/select_live_materialization_entries.sql");
 const SELECT_SOURCE_FILE_ID_SQL: &str = include_str!("catalog/sql/select_source_file_id.sql");
 const UPSERT_SOURCE_FILE_SQL: &str = include_str!("catalog/sql/upsert_source_file.sql");
+const SELECT_KNOWN_SOURCE_FILE_SQL: &str = include_str!("catalog/sql/select_known_source_file.sql");
+const OBSERVE_KNOWN_SOURCE_FILE_SQL: &str =
+    include_str!("catalog/sql/observe_known_source_file.sql");
+const RESURRECT_KNOWN_SOURCE_BLOB_SQL: &str =
+    include_str!("catalog/sql/resurrect_known_source_blob.sql");
 const WRITABLE_PRAGMAS_SQL: &str = include_str!("catalog/sql/writable_pragmas.sql");
 
 pub trait Clock {
@@ -891,6 +896,16 @@ pub struct SourceObservation {
     pub observed_at_ms: i64,
 }
 
+/// A previously recorded source identity and the blob it references.
+#[derive(Clone, Debug)]
+pub struct KnownSourceFile {
+    pub blob_hash: BlobHash,
+    pub source_size_bytes: u64,
+    pub modified_at_ms: Option<i64>,
+    pub blob_size_bytes: u64,
+    pub blob_deleted_at_ms: Option<i64>,
+}
+
 #[derive(Clone, Debug)]
 pub struct LiveMaterializationEntry {
     pub relative_path: SourceRelativePath,
@@ -1022,12 +1037,113 @@ impl Catalog {
         tx.commit().wrap_err("commit catalog import transaction")?;
         Ok((blob_outcome, source_outcome))
     }
+
+    pub fn known_source_file(
+        &self,
+        source_root: &str,
+        relative_path: &SourceRelativePath,
+    ) -> Result<Option<KnownSourceFile>> {
+        known_source_file(&self.connection, source_root, relative_path)
+    }
+
+    /// Record a repeat observation without changing its blob identity.
+    ///
+    /// Both updates are in one transaction so a deletion-marked blob is
+    /// resurrected exactly when its source observation is refreshed.
+    pub fn observe_known_source_file(
+        &mut self,
+        observation: SourceObservation,
+        expected_blob_size_bytes: u64,
+    ) -> Result<()> {
+        let tx = self
+            .connection
+            .transaction()
+            .wrap_err("begin known-source observation transaction")?;
+        let source_rows = tx
+            .execute(
+                OBSERVE_KNOWN_SOURCE_FILE_SQL,
+                params![
+                    observation.source_root.as_str(),
+                    observation.relative_path.as_str(),
+                    observation.blob_hash.as_str(),
+                    sqlite_u64(observation.size_bytes, "source file size")?,
+                    observation.modified_at_ms,
+                    observation.observed_at_ms,
+                ],
+            )
+            .wrap_err("refresh known source observation")?;
+        if source_rows != 1 {
+            bail!(
+                "known-source observation for {:?} expected one matching source row, affected {source_rows}",
+                observation.relative_path
+            );
+        }
+        let blob_rows = tx
+            .execute(
+                RESURRECT_KNOWN_SOURCE_BLOB_SQL,
+                params![
+                    observation.blob_hash.as_str(),
+                    sqlite_u64(expected_blob_size_bytes, "expected blob size")?,
+                ],
+            )
+            .wrap_err("resurrect known source blob")?;
+        if blob_rows != 1 {
+            bail!(
+                "known-source observation for blob {} expected one matching blob row, affected {blob_rows}",
+                observation.blob_hash
+            );
+        }
+        tx.commit()
+            .wrap_err("commit known-source observation transaction")
+    }
 }
 
 fn sqlite_u64(value: u64, label: &str) -> Result<i64> {
     value
         .try_into()
         .map_err(|_| eyre!("{label} exceeds SQLite INTEGER range: {value}"))
+}
+
+fn known_source_file(
+    connection: &Connection,
+    source_root: &str,
+    relative_path: &SourceRelativePath,
+) -> Result<Option<KnownSourceFile>> {
+    type KnownSourceRow = (String, i64, Option<i64>, i64, Option<i64>);
+    let row: Option<KnownSourceRow> = connection
+        .query_row(
+            SELECT_KNOWN_SOURCE_FILE_SQL,
+            params![source_root, relative_path.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .wrap_err("read known source file")?;
+    row.map(
+        |(blob_hash, source_size_bytes, modified_at_ms, blob_size_bytes, blob_deleted_at_ms)| {
+            let source_size_bytes: u64 = source_size_bytes
+                .try_into()
+                .map_err(|_| eyre!("catalog source size is negative for hash {blob_hash}"))?;
+            let blob_size_bytes: u64 = blob_size_bytes
+                .try_into()
+                .map_err(|_| eyre!("catalog blob size is negative for hash {blob_hash}"))?;
+            Ok(KnownSourceFile {
+                blob_hash: BlobHash::new(blob_hash)?,
+                source_size_bytes,
+                modified_at_ms,
+                blob_size_bytes,
+                blob_deleted_at_ms,
+            })
+        },
+    )
+    .transpose()
 }
 
 impl ReadOnlyCatalog {
@@ -1097,6 +1213,14 @@ impl ReadOnlyCatalog {
         } else {
             SourceObservationOutcome::Inserted
         })
+    }
+
+    pub fn known_source_file(
+        &self,
+        source_root: &str,
+        relative_path: &SourceRelativePath,
+    ) -> Result<Option<KnownSourceFile>> {
+        known_source_file(&self.connection, source_root, relative_path)
     }
 
     pub fn live_materialization_entries(&self) -> Result<Vec<LiveMaterializationEntry>> {

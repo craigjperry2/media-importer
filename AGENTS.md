@@ -5,7 +5,6 @@
 This repository is in a clean-slate Rust rewrite. Treat these files as the
 source of truth for current implementation work:
 
-- `docs/from-scratch-in-rust/IMPLEMENTATION.md`
 - `docs/from-scratch-in-rust/SPEC.md`
 - `docs/from-scratch-in-rust/RUST.instructions.md`
 - `docs/from-scratch-in-rust/RUST-ARCHITECTURE.instructions.md`
