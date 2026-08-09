@@ -76,7 +76,7 @@ pub struct GcOptions {
     pub store: PathBuf,
     pub db: Option<PathBuf>,
     pub dry_run: bool,
-    pub chunk_size: NonZeroUsize,
+    pub chunk_size: usize,
 }
 
 impl AuditConfig {
@@ -94,6 +94,8 @@ impl AuditConfig {
 
 impl GcConfig {
     pub fn from_options(options: GcOptions) -> Result<Self> {
+        let chunk_size = NonZeroUsize::new(options.chunk_size)
+            .ok_or_else(|| color_eyre::eyre::eyre!("--chunk-size must be non-zero"))?;
         let store_root = StoreRoot::validate_existing(&options.store)?;
         let db_path = options.db.unwrap_or_else(|| store_root.default_db_path());
         validate_existing_catalog(&db_path)?;
@@ -101,7 +103,7 @@ impl GcConfig {
             store_root,
             db_path,
             dry_run: options.dry_run,
-            chunk_size: options.chunk_size,
+            chunk_size,
         })
     }
 }

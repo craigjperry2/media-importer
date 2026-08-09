@@ -106,6 +106,10 @@ without creating, changing, or deleting catalog, SQLite sidecar, CAS, staging,
 permission, or timestamp state (ordinary reads may update access times
 according to the filesystem's mount policy).
 
+GC requires a non-zero `--chunk-size`. A zero value is invalid GC
+configuration and returns exit status `1` without producing a GC summary or
+mutating durable state.
+
 Filesystem removal and the SQLite commit cannot be globally atomic. GC removes
 and directory-syncs a blob before deleting its catalog row. If interrupted
 between those steps, a later run recognizes a previously marked, unreachable,

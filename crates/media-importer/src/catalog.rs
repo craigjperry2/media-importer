@@ -754,6 +754,47 @@ fn require_one_gc_row(operation: &str, blob: &CatalogBlob, affected: usize) -> R
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{BlobHash, Connection, Path, Result};
+
+    const DELETE_SOURCES_SQL: &str = include_str!("catalog/sql/test_delete_sources.sql");
+    const SET_MARK_SQL: &str = include_str!("catalog/sql/test_set_mark.sql");
+    const READ_MARKS_SQL: &str = include_str!("catalog/sql/test_read_marks.sql");
+    const BLOB_COUNT_SQL: &str = include_str!("catalog/sql/test_blob_count.sql");
+    const READ_MARK_SQL: &str = include_str!("catalog/sql/test_read_mark.sql");
+
+    pub(crate) fn delete_sources(path: &Path, hash: Option<&BlobHash>) -> Result<()> {
+        Connection::open(path)?.execute(
+            DELETE_SOURCES_SQL,
+            [hash.map(crate::paths::BlobHash::as_str)],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn set_mark(path: &Path, hash: &BlobHash, value: i64) -> Result<()> {
+        Connection::open(path)?.execute(SET_MARK_SQL, (hash.as_str(), value))?;
+        Ok(())
+    }
+
+    pub(crate) fn read_marks(path: &Path) -> Result<Vec<i64>> {
+        let connection = Connection::open(path)?;
+        let mut statement = connection.prepare(READ_MARKS_SQL)?;
+        let values = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(values)
+    }
+
+    pub(crate) fn blob_count(path: &Path) -> Result<i64> {
+        Ok(Connection::open(path)?.query_row(BLOB_COUNT_SQL, [], |row| row.get(0))?)
+    }
+
+    pub(crate) fn read_mark(path: &Path, hash: &BlobHash) -> Result<Option<i64>> {
+        Ok(Connection::open(path)?.query_row(READ_MARK_SQL, [hash.as_str()], |row| row.get(0))?)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BlobRecord {
     pub hash: BlobHash,

@@ -53,8 +53,8 @@ struct GcArgs {
     db: Option<PathBuf>,
     #[arg(long)]
     dry_run: bool,
-    #[arg(long, default_value_t = DEFAULT_CHUNK_SIZE)]
-    chunk_size: NonZeroUsize,
+    #[arg(long, default_value_t = DEFAULT_CHUNK_SIZE.get())]
+    chunk_size: usize,
 }
 
 #[derive(Debug, Parser)]

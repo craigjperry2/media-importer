@@ -565,7 +565,10 @@ Add a regression test that:
 ## CLI Dispatch And Rendering
 
 Add `Gc` to the Clap command and validated command enum. Reuse
-`DEFAULT_CHUNK_SIZE` and Clap's `NonZeroUsize` parsing.
+`DEFAULT_CHUNK_SIZE`, parse the GC CLI value as `usize`, and convert it to
+`NonZeroUsize` during `GcOptions -> GcConfig` validation. This deliberately
+routes `gc --chunk-size 0` through the normal invalid-configuration path with
+exit status 1, rather than Clap's parse-error exit status 2.
 
 Map outcomes:
 

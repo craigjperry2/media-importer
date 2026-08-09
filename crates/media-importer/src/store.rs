@@ -255,7 +255,7 @@ pub fn open_blob_no_follow(root: &StoreRoot, hash: &BlobHash) -> std::io::Result
     })
 }
 
-pub fn remove_revalidated_blob(
+pub(crate) fn revalidate_blob_for_removal(
     root: &StoreRoot,
     hash: &BlobHash,
     expected: &BlobFileIdentity,
@@ -270,7 +270,17 @@ pub fn remove_revalidated_blob(
     if &actual != expected {
         bail!("GC candidate {hash} changed after preflight");
     }
+    Ok(())
+}
+
+pub(crate) fn remove_blob_file(root: &StoreRoot, hash: &BlobHash) -> Result<()> {
+    let path = root.blob_path(hash);
     fs::remove_file(&path).wrap_err_with(|| format!("remove GC candidate {hash}"))?;
+    Ok(())
+}
+
+pub(crate) fn sync_blob_parent(root: &StoreRoot, hash: &BlobHash) -> Result<()> {
+    let path = root.blob_path(hash);
     let parent = path
         .parent()
         .ok_or_else(|| eyre!("GC candidate {hash} has no containing directory"))?;

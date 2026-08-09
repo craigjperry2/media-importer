@@ -20,8 +20,8 @@ use crate::hashing::hash_open_file;
 use crate::integrity::{IntegrityFinding, push_finding, sort_and_deduplicate};
 use crate::paths::BlobHash;
 use crate::store::{
-    BlobFileIdentity, inspect_cas, open_blob_no_follow, remove_revalidated_blob,
-    sync_nearest_existing_blob_parent,
+    BlobFileIdentity, inspect_cas, open_blob_no_follow, remove_blob_file,
+    revalidate_blob_for_removal, sync_blob_parent, sync_nearest_existing_blob_parent,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -104,7 +104,7 @@ struct Preflight {
     report: GcReport,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct StagedProgress {
     marks: u64,
     resurrections: u64,
@@ -112,13 +112,83 @@ struct StagedProgress {
     reclaimed: u64,
 }
 
+impl StagedProgress {
+    fn checked_mark(self) -> Result<Self> {
+        Ok(Self {
+            marks: self
+                .marks
+                .checked_add(1)
+                .ok_or_else(|| eyre!("completed mark counter overflow"))?,
+            ..self
+        })
+    }
+
+    fn checked_resurrection(self) -> Result<Self> {
+        Ok(Self {
+            resurrections: self
+                .resurrections
+                .checked_add(1)
+                .ok_or_else(|| eyre!("completed resurrection counter overflow"))?,
+            ..self
+        })
+    }
+
+    fn checked_sweep(self, size_bytes: u64, source_state: SweepSourceState) -> Result<Self> {
+        let reclaimed = if source_state == SweepSourceState::Present {
+            self.reclaimed
+                .checked_add(size_bytes)
+                .ok_or_else(|| eyre!("reclaimed byte count overflow"))?
+        } else {
+            self.reclaimed
+        };
+        Ok(Self {
+            sweeps: self
+                .sweeps
+                .checked_add(1)
+                .ok_or_else(|| eyre!("completed sweep counter overflow"))?,
+            reclaimed,
+            ..self
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PhysicalProgress {
+    cas_files_removed: u64,
+    bytes_unlinked: u64,
+}
+
+impl PhysicalProgress {
+    fn checked_after_present_unlink(report: &GcReport, size_bytes: u64) -> Result<Self> {
+        Ok(Self {
+            cas_files_removed: report
+                .cas_files_removed
+                .checked_add(1)
+                .ok_or_else(|| eyre!("removed CAS file counter overflow"))?,
+            bytes_unlinked: report
+                .bytes_unlinked
+                .checked_add(size_bytes)
+                .ok_or_else(|| eyre!("unlinked byte count overflow"))?,
+        })
+    }
+
+    fn assign_to(self, report: &mut GcReport) {
+        report.cas_files_removed = self.cas_files_removed;
+        report.bytes_unlinked = self.bytes_unlinked;
+    }
+}
+
 trait GcStoreMutator {
-    fn remove_present(
+    fn revalidate_present(
         &self,
         config: &GcConfig,
         hash: &BlobHash,
         identity: &BlobFileIdentity,
     ) -> Result<()>;
+
+    fn unlink_present(&self, config: &GcConfig, hash: &BlobHash) -> Result<()>;
+
+    fn sync_present_parent(&self, config: &GcConfig, hash: &BlobHash) -> Result<()>;
 
     fn sync_absent(&self, config: &GcConfig, hash: &BlobHash) -> Result<()>;
 }
@@ -126,13 +196,21 @@ trait GcStoreMutator {
 struct FilesystemGcMutator;
 
 impl GcStoreMutator for FilesystemGcMutator {
-    fn remove_present(
+    fn revalidate_present(
         &self,
         config: &GcConfig,
         hash: &BlobHash,
         identity: &BlobFileIdentity,
     ) -> Result<()> {
-        remove_revalidated_blob(&config.store_root, hash, identity)
+        revalidate_blob_for_removal(&config.store_root, hash, identity)
+    }
+
+    fn unlink_present(&self, config: &GcConfig, hash: &BlobHash) -> Result<()> {
+        remove_blob_file(&config.store_root, hash)
+    }
+
+    fn sync_present_parent(&self, config: &GcConfig, hash: &BlobHash) -> Result<()> {
+        sync_blob_parent(&config.store_root, hash)
     }
 
     fn sync_absent(&self, config: &GcConfig, hash: &BlobHash) -> Result<()> {
@@ -458,6 +536,15 @@ fn apply_plan(
     let mut progress = StagedProgress::default();
     let marked_at_ms = clock.now_ms();
     for blob in &preflight.plan.marks {
+        let next_progress = match progress.checked_mark() {
+            Ok(next) => next,
+            Err(error) => {
+                return Ok(GcOutcome::Incomplete {
+                    report: preflight.report,
+                    error,
+                });
+            }
+        };
         if let Err(error) = transaction.stage_mark(blob, marked_at_ms) {
             return Ok(GcOutcome::Incomplete {
                 report: preflight.report,
@@ -465,9 +552,18 @@ fn apply_plan(
             });
         }
         staged_actions.push(action_for(GcActionKind::Mark, blob, None));
-        progress.marks += 1;
+        progress = next_progress;
     }
     for blob in &preflight.plan.resurrections {
+        let next_progress = match progress.checked_resurrection() {
+            Ok(next) => next,
+            Err(error) => {
+                return Ok(GcOutcome::Incomplete {
+                    report: preflight.report,
+                    error,
+                });
+            }
+        };
         if let Err(error) = transaction.stage_resurrection(blob) {
             return Ok(GcOutcome::Incomplete {
                 report: preflight.report,
@@ -475,40 +571,97 @@ fn apply_plan(
             });
         }
         staged_actions.push(action_for(GcActionKind::Resurrect, blob, None));
-        progress.resurrections += 1;
+        progress = next_progress;
     }
 
     for candidate in &preflight.sweep_candidates {
-        let mutation = match candidate.source_state {
-            SweepSourceState::Present => {
-                let identity = candidate.identity.as_ref().ok_or_else(|| {
-                    eyre!("missing preflight identity for {}", candidate.blob.hash)
-                })?;
-                mutator.remove_present(&config, &candidate.blob.hash, identity)
+        let next_progress =
+            match progress.checked_sweep(candidate.blob.size_bytes, candidate.source_state) {
+                Ok(next) => next,
+                Err(error) => {
+                    return Ok(commit_partial(
+                        transaction,
+                        preflight.report,
+                        staged_actions,
+                        progress,
+                        error,
+                    ));
+                }
+            };
+        let next_physical = if candidate.source_state == SweepSourceState::Present {
+            match PhysicalProgress::checked_after_present_unlink(
+                &preflight.report,
+                candidate.blob.size_bytes,
+            ) {
+                Ok(next) => Some(next),
+                Err(error) => {
+                    return Ok(commit_partial(
+                        transaction,
+                        preflight.report,
+                        staged_actions,
+                        progress,
+                        error,
+                    ));
+                }
             }
-            SweepSourceState::AlreadyAbsent => mutator.sync_absent(&config, &candidate.blob.hash),
+        } else {
+            None
         };
-        if let Err(error) = mutation {
-            return Ok(commit_partial(
-                transaction,
-                preflight.report,
-                staged_actions,
-                progress,
-                error,
-            ));
-        }
-
-        if candidate.source_state == SweepSourceState::Present {
-            preflight.report.cas_files_removed = preflight
-                .report
-                .cas_files_removed
-                .checked_add(1)
-                .ok_or_else(|| eyre!("removed CAS file counter overflow"))?;
-            preflight.report.bytes_unlinked = preflight
-                .report
-                .bytes_unlinked
-                .checked_add(candidate.blob.size_bytes)
-                .ok_or_else(|| eyre!("unlinked byte count overflow"))?;
+        match candidate.source_state {
+            SweepSourceState::Present => {
+                let Some(identity) = candidate.identity.as_ref() else {
+                    return Ok(commit_partial(
+                        transaction,
+                        preflight.report,
+                        staged_actions,
+                        progress,
+                        eyre!("missing preflight identity for {}", candidate.blob.hash),
+                    ));
+                };
+                if let Err(error) =
+                    mutator.revalidate_present(&config, &candidate.blob.hash, identity)
+                {
+                    return Ok(commit_partial(
+                        transaction,
+                        preflight.report,
+                        staged_actions,
+                        progress,
+                        error,
+                    ));
+                }
+                if let Err(error) = mutator.unlink_present(&config, &candidate.blob.hash) {
+                    return Ok(commit_partial(
+                        transaction,
+                        preflight.report,
+                        staged_actions,
+                        progress,
+                        error,
+                    ));
+                }
+                next_physical
+                    .expect("present sweep candidates have checked physical progress")
+                    .assign_to(&mut preflight.report);
+                if let Err(error) = mutator.sync_present_parent(&config, &candidate.blob.hash) {
+                    return Ok(commit_partial(
+                        transaction,
+                        preflight.report,
+                        staged_actions,
+                        progress,
+                        error,
+                    ));
+                }
+            }
+            SweepSourceState::AlreadyAbsent => {
+                if let Err(error) = mutator.sync_absent(&config, &candidate.blob.hash) {
+                    return Ok(commit_partial(
+                        transaction,
+                        preflight.report,
+                        staged_actions,
+                        progress,
+                        error,
+                    ));
+                }
+            }
         }
 
         if let Err(error) = transaction.stage_sweep(&candidate.blob) {
@@ -528,13 +681,7 @@ fn apply_plan(
             &candidate.blob,
             Some(candidate.source_state),
         ));
-        progress.sweeps += 1;
-        if candidate.source_state == SweepSourceState::Present {
-            progress.reclaimed = progress
-                .reclaimed
-                .checked_add(candidate.blob.size_bytes)
-                .ok_or_else(|| eyre!("reclaimed byte count overflow"))?;
-        }
+        progress = next_progress;
     }
 
     match transaction.commit() {
@@ -679,7 +826,7 @@ mod tests {
 
     use assert_fs::TempDir;
 
-    use crate::catalog::{BlobRecord, Catalog, SourceObservation};
+    use crate::catalog::{BlobRecord, Catalog, SourceObservation, test_support};
     use crate::paths::{SourceRelativePath, StoreRoot};
 
     #[test]
@@ -688,6 +835,221 @@ mod tests {
         assert_eq!(classify(true, true), PlannedKind::Resurrect);
         assert_eq!(classify(false, false), PlannedKind::Mark);
         assert_eq!(classify(false, true), PlannedKind::Sweep);
+    }
+
+    #[test]
+    fn checked_staged_progress_reports_counter_specific_overflow() {
+        let mark_error = StagedProgress {
+            marks: u64::MAX,
+            ..StagedProgress::default()
+        }
+        .checked_mark()
+        .expect_err("mark overflow");
+        assert!(mark_error.to_string().contains("completed mark counter"));
+
+        let resurrection_error = StagedProgress {
+            resurrections: u64::MAX,
+            ..StagedProgress::default()
+        }
+        .checked_resurrection()
+        .expect_err("resurrection overflow");
+        assert!(
+            resurrection_error
+                .to_string()
+                .contains("completed resurrection counter")
+        );
+
+        let sweep_error = StagedProgress {
+            sweeps: u64::MAX,
+            ..StagedProgress::default()
+        }
+        .checked_sweep(0, SweepSourceState::AlreadyAbsent)
+        .expect_err("sweep overflow");
+        assert!(sweep_error.to_string().contains("completed sweep counter"));
+
+        let byte_error = StagedProgress {
+            reclaimed: u64::MAX,
+            ..StagedProgress::default()
+        }
+        .checked_sweep(1, SweepSourceState::Present)
+        .expect_err("reclaimed byte overflow");
+        assert!(byte_error.to_string().contains("reclaimed byte count"));
+        assert_eq!(
+            StagedProgress {
+                reclaimed: u64::MAX,
+                ..StagedProgress::default()
+            }
+            .checked_sweep(1, SweepSourceState::AlreadyAbsent)
+            .expect("absent sweep adds no reclaimed bytes")
+            .reclaimed,
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn checked_physical_progress_does_not_partially_assign_on_overflow() {
+        let mut report = empty_report();
+        report.cas_files_removed = 7;
+        report.bytes_unlinked = u64::MAX;
+        let error =
+            PhysicalProgress::checked_after_present_unlink(&report, 1).expect_err("byte overflow");
+        assert!(error.to_string().contains("unlinked byte count"));
+        assert_eq!(report.cas_files_removed, 7);
+        assert_eq!(report.bytes_unlinked, u64::MAX);
+
+        report.cas_files_removed = u64::MAX;
+        report.bytes_unlinked = 0;
+        let error = PhysicalProgress::checked_after_present_unlink(&report, 0)
+            .expect_err("file counter overflow");
+        assert!(error.to_string().contains("removed CAS file counter"));
+        assert_eq!(report.cas_files_removed, u64::MAX);
+        assert_eq!(report.bytes_unlinked, 0);
+    }
+
+    #[test]
+    fn fixed_clock_value_is_persisted_for_every_mark() {
+        let temp = TempDir::new().expect("tempdir");
+        let store_path = temp.path().join("store");
+        fs::create_dir_all(store_path.join("blobs")).expect("create blobs root");
+        let store_root = StoreRoot::validate_existing(&store_path).expect("validate store");
+        let db_path = store_root.default_db_path();
+        let mut catalog = Catalog::open_or_initialize(&db_path).expect("create catalog");
+        add_fixture_blob(&store_root, &mut catalog, b"first");
+        add_fixture_blob(&store_root, &mut catalog, b"second");
+        drop(catalog);
+        test_support::delete_sources(&db_path, None).expect("make fixtures unreachable");
+
+        let config = GcConfig {
+            store_root,
+            db_path: db_path.clone(),
+            dry_run: false,
+            chunk_size: NonZeroUsize::new(2).expect("non-zero"),
+        };
+        let outcome =
+            collect_garbage_with_clock(config, &FixedClock).expect("collect with fixed clock");
+        let GcOutcome::Complete(report) = outcome else {
+            panic!("expected complete mark run");
+        };
+        assert_eq!(report.completed_marks, 2);
+
+        let marks = test_support::read_marks(&db_path).expect("read marks");
+        assert_eq!(marks, vec![123, 123]);
+    }
+
+    #[test]
+    fn sync_failure_after_unlink_reports_physical_only_progress_and_recovers() {
+        let (_temp, config, hash) = marked_unreachable_fixture(b"sync-failure");
+        let outcome = collect_garbage_with_dependencies(config.clone(), &FixedClock, &FailSync)
+            .expect("GC with injected sync failure");
+        let GcOutcome::Incomplete { report, error } = outcome else {
+            panic!("expected incomplete outcome");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("injected directory sync failure")
+        );
+        assert_eq!(report.cas_files_removed, 1);
+        assert_eq!(report.bytes_unlinked, 12);
+        assert_eq!(report.completed_sweeps, 0);
+        assert!(report.actions.is_empty());
+        assert!(!config.store_root.blob_path(&hash).exists());
+        assert_eq!(catalog_blob_count(&config.db_path), 1);
+
+        let recovery = collect_garbage(config.clone()).expect("recover interrupted sweep");
+        let GcOutcome::Complete(report) = recovery else {
+            panic!("expected complete recovery");
+        };
+        assert_eq!(report.completed_sweeps, 1);
+        assert_eq!(report.cas_files_removed, 0);
+        assert_eq!(report.bytes_reclaimed, 0);
+        assert_eq!(catalog_blob_count(&config.db_path), 0);
+    }
+
+    #[test]
+    fn revalidation_and_unlink_failures_stop_before_physical_progress_and_recover() {
+        for stage in [FaultStage::Revalidate, FaultStage::Unlink] {
+            let (_temp, config, hash) = marked_unreachable_fixture(b"early-failure");
+            let outcome = collect_garbage_with_dependencies(
+                config.clone(),
+                &FixedClock,
+                &FailAtStage { stage },
+            )
+            .expect("GC with injected early failure");
+            let GcOutcome::Incomplete { report, error } = outcome else {
+                panic!("expected incomplete outcome");
+            };
+            assert!(error.to_string().contains(stage.error_text()));
+            assert_eq!(report.cas_files_removed, 0);
+            assert_eq!(report.bytes_unlinked, 0);
+            assert_eq!(report.completed_sweeps, 0);
+            assert!(report.actions.is_empty());
+            assert!(config.store_root.blob_path(&hash).exists());
+            assert_eq!(catalog_blob_count(&config.db_path), 1);
+
+            let recovery = collect_garbage(config.clone()).expect("recover candidate");
+            let GcOutcome::Complete(report) = recovery else {
+                panic!("expected complete recovery");
+            };
+            assert_eq!(report.completed_sweeps, 1);
+            assert_eq!(report.cas_files_removed, 1);
+            assert_eq!(catalog_blob_count(&config.db_path), 0);
+        }
+    }
+
+    #[test]
+    fn later_failure_commits_earlier_marks_resurrections_and_sweeps() {
+        let temp = TempDir::new().expect("tempdir");
+        let store_path = temp.path().join("store");
+        fs::create_dir_all(store_path.join("blobs")).expect("create blobs root");
+        let store_root = StoreRoot::validate_existing(&store_path).expect("validate store");
+        let db_path = store_root.default_db_path();
+        let mut catalog = Catalog::open_or_initialize(&db_path).expect("create catalog");
+        let sweep_a = add_fixture_blob_at(&store_root, &mut catalog, b"sweep-a", "sweep-a");
+        let sweep_b = add_fixture_blob_at(&store_root, &mut catalog, b"sweep-b", "sweep-b");
+        let mark = add_fixture_blob_at(&store_root, &mut catalog, b"mark", "mark");
+        let resurrect = add_fixture_blob_at(&store_root, &mut catalog, b"resurrect", "resurrect");
+        drop(catalog);
+        for hash in [&sweep_a, &sweep_b, &mark] {
+            test_support::delete_sources(&db_path, Some(hash)).expect("make blob unreachable");
+        }
+        for hash in [&sweep_a, &sweep_b, &resurrect] {
+            test_support::set_mark(&db_path, hash, 1).expect("mark fixture blob");
+        }
+
+        let config = GcConfig {
+            store_root,
+            db_path: db_path.clone(),
+            dry_run: false,
+            chunk_size: NonZeroUsize::new(2).expect("non-zero"),
+        };
+        let fault = FailSecondRemoval {
+            calls: Cell::new(0),
+        };
+        let outcome = collect_garbage_with_dependencies(config.clone(), &FixedClock, &fault)
+            .expect("GC with later failure");
+        let GcOutcome::Incomplete { report, error } = outcome else {
+            panic!("expected incomplete outcome");
+        };
+        assert!(error.to_string().contains("injected deletion failure"));
+        assert_eq!(report.planned_marks, 1);
+        assert_eq!(report.planned_resurrections, 1);
+        assert_eq!(report.planned_sweeps, 2);
+        assert_eq!(report.completed_marks, 1);
+        assert_eq!(report.completed_resurrections, 1);
+        assert_eq!(report.completed_sweeps, 1);
+        assert_eq!(report.cas_files_removed, 1);
+        assert_eq!(report.actions.len(), 3);
+        assert_eq!(catalog_mark(&db_path, &mark), Some(123));
+        assert_eq!(catalog_mark(&db_path, &resurrect), None);
+
+        let recovery = collect_garbage(config).expect("recover remaining candidates");
+        let GcOutcome::Complete(report) = recovery else {
+            panic!("expected complete recovery");
+        };
+        assert_eq!(report.completed_sweeps, 2);
+        assert_eq!(catalog_blob_count(&db_path), 1);
+        assert_eq!(catalog_mark(&db_path, &resurrect), None);
     }
 
     #[test]
@@ -750,18 +1112,26 @@ mod tests {
     }
 
     impl GcStoreMutator for FailSecondRemoval {
-        fn remove_present(
+        fn revalidate_present(
             &self,
             config: &GcConfig,
             hash: &BlobHash,
             identity: &BlobFileIdentity,
         ) -> Result<()> {
+            FilesystemGcMutator.revalidate_present(config, hash, identity)
+        }
+
+        fn unlink_present(&self, config: &GcConfig, hash: &BlobHash) -> Result<()> {
             let call = self.calls.get() + 1;
             self.calls.set(call);
             if call == 2 {
                 return Err(eyre!("injected deletion failure"));
             }
-            FilesystemGcMutator.remove_present(config, hash, identity)
+            FilesystemGcMutator.unlink_present(config, hash)
+        }
+
+        fn sync_present_parent(&self, config: &GcConfig, hash: &BlobHash) -> Result<()> {
+            FilesystemGcMutator.sync_present_parent(config, hash)
         }
 
         fn sync_absent(&self, config: &GcConfig, hash: &BlobHash) -> Result<()> {
@@ -769,7 +1139,141 @@ mod tests {
         }
     }
 
+    struct FailSync;
+
+    impl GcStoreMutator for FailSync {
+        fn revalidate_present(
+            &self,
+            config: &GcConfig,
+            hash: &BlobHash,
+            identity: &BlobFileIdentity,
+        ) -> Result<()> {
+            FilesystemGcMutator.revalidate_present(config, hash, identity)
+        }
+
+        fn unlink_present(&self, config: &GcConfig, hash: &BlobHash) -> Result<()> {
+            FilesystemGcMutator.unlink_present(config, hash)
+        }
+
+        fn sync_present_parent(&self, _config: &GcConfig, _hash: &BlobHash) -> Result<()> {
+            Err(eyre!("injected directory sync failure"))
+        }
+
+        fn sync_absent(&self, config: &GcConfig, hash: &BlobHash) -> Result<()> {
+            FilesystemGcMutator.sync_absent(config, hash)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum FaultStage {
+        Revalidate,
+        Unlink,
+    }
+
+    impl FaultStage {
+        fn error_text(self) -> &'static str {
+            match self {
+                Self::Revalidate => "injected revalidation failure",
+                Self::Unlink => "injected unlink failure",
+            }
+        }
+    }
+
+    struct FailAtStage {
+        stage: FaultStage,
+    }
+
+    impl GcStoreMutator for FailAtStage {
+        fn revalidate_present(
+            &self,
+            config: &GcConfig,
+            hash: &BlobHash,
+            identity: &BlobFileIdentity,
+        ) -> Result<()> {
+            if matches!(self.stage, FaultStage::Revalidate) {
+                return Err(eyre!("{}", self.stage.error_text()));
+            }
+            FilesystemGcMutator.revalidate_present(config, hash, identity)
+        }
+
+        fn unlink_present(&self, config: &GcConfig, hash: &BlobHash) -> Result<()> {
+            if matches!(self.stage, FaultStage::Unlink) {
+                return Err(eyre!("{}", self.stage.error_text()));
+            }
+            FilesystemGcMutator.unlink_present(config, hash)
+        }
+
+        fn sync_present_parent(&self, config: &GcConfig, hash: &BlobHash) -> Result<()> {
+            FilesystemGcMutator.sync_present_parent(config, hash)
+        }
+
+        fn sync_absent(&self, config: &GcConfig, hash: &BlobHash) -> Result<()> {
+            FilesystemGcMutator.sync_absent(config, hash)
+        }
+    }
+
+    fn empty_report() -> GcReport {
+        GcReport {
+            dry_run: false,
+            catalog_blobs: 0,
+            reachable_blobs: 0,
+            sweep_candidates_hashed: 0,
+            planned_marks: 0,
+            planned_resurrections: 0,
+            planned_sweeps: 0,
+            completed_marks: 0,
+            completed_resurrections: 0,
+            completed_sweeps: 0,
+            cas_files_removed: 0,
+            bytes_reclaimable: 0,
+            bytes_unlinked: 0,
+            bytes_reclaimed: 0,
+            actions: Vec::new(),
+            findings: Vec::new(),
+        }
+    }
+
+    fn marked_unreachable_fixture(content: &[u8]) -> (TempDir, GcConfig, BlobHash) {
+        let temp = TempDir::new().expect("tempdir");
+        let store_path = temp.path().join("store");
+        fs::create_dir_all(store_path.join("blobs")).expect("create blobs root");
+        let store_root = StoreRoot::validate_existing(&store_path).expect("validate store");
+        let db_path = store_root.default_db_path();
+        let mut catalog = Catalog::open_or_initialize(&db_path).expect("create catalog");
+        let hash = add_fixture_blob(&store_root, &mut catalog, content);
+        drop(catalog);
+        test_support::delete_sources(&db_path, None).expect("make fixture unreachable");
+        test_support::set_mark(&db_path, &hash, 1).expect("mark fixture");
+        (
+            temp,
+            GcConfig {
+                store_root,
+                db_path,
+                dry_run: false,
+                chunk_size: NonZeroUsize::new(2).expect("non-zero"),
+            },
+            hash,
+        )
+    }
+
+    fn catalog_blob_count(path: &std::path::Path) -> i64 {
+        test_support::blob_count(path).expect("count blobs")
+    }
+
+    fn catalog_mark(path: &std::path::Path, hash: &BlobHash) -> Option<i64> {
+        test_support::read_mark(path, hash).expect("read mark")
+    }
+
     fn add_fixture_blob(store_root: &StoreRoot, catalog: &mut Catalog, content: &[u8]) -> BlobHash {
+        add_fixture_blob_at(store_root, catalog, content, "same.bin")
+    }
+
+    fn add_fixture_blob_at(
+        store_root: &StoreRoot,
+        catalog: &mut Catalog,
+        content: &[u8],
+        relative_path: &str,
+    ) -> BlobHash {
         let hash = BlobHash::new(blake3::hash(content).to_hex().to_string()).expect("valid hash");
         let path = store_root.blob_path(&hash);
         fs::create_dir_all(path.parent().expect("blob parent")).expect("create shard");
@@ -783,7 +1287,7 @@ mod tests {
                 },
                 SourceObservation {
                     source_root: String::from("/fixture"),
-                    relative_path: SourceRelativePath::from_catalog_text("same.bin")
+                    relative_path: SourceRelativePath::from_catalog_text(relative_path)
                         .expect("relative path"),
                     blob_hash: hash.clone(),
                     size_bytes: content.len() as u64,
