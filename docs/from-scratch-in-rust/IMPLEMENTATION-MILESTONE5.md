@@ -615,18 +615,22 @@ Milestone 5 does not include:
 
 ## Future Milestones
 
-Likely follow-up work remains:
+The planned spec-convergence sequence is now documented:
 
-- explicit source-record management and deletion policy;
-- repair or quarantine workflows for orphaned and corrupt blobs;
-- configurable retention periods;
-- relationship tables and relationship-aware reachability;
-- metadata-skip optimization;
-- mount-point workers and parallel hashing;
-- single-writer database coordination, batching, and managed WAL checkpoints;
-- progress dashboards and structured non-TTY logs;
-- browse-tree audit and configurable merge policies; and
-- large-store performance and crash/fault-injection campaigns.
+1. `IMPLEMENTATION-MILESTONE6.md`: metadata-fast idempotent import;
+2. `IMPLEMENTATION-MILESTONE7.md`: single catalog writer, batching, and managed
+   passive WAL checkpoints;
+3. `IMPLEMENTATION-MILESTONE8.md`: bounded mount-aware parallel ingestion;
+4. `IMPLEMENTATION-MILESTONE9.md`: semantic blob relationships and
+   relationship-aware reachability;
+5. `IMPLEMENTATION-MILESTONE10.md`: TTY dashboards and structured non-TTY
+   output; and
+6. `IMPLEMENTATION-MILESTONE11.md`: staging recovery, architecture/platform
+   conformance, and extended I/O/fault verification.
+
+Potential post-spec work remains intentionally unplanned: explicit source-record
+management, repair/quarantine, configurable retention, browse-tree audit, and
+configurable merge policies.
 
 Revisit the single-node coordination design only if a concrete deployment later
 introduces multiple hosts, isolated lock namespaces, or deliberately shared
