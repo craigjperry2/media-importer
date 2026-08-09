@@ -5,6 +5,7 @@ use crate::catalog::{
     SystemClock,
 };
 use crate::config::ImportConfig;
+use crate::run_lock::{LockMode, StoreRunLock};
 use crate::scanner::{SourceFileCandidate, scan_source};
 use crate::store::{Store, StoreOutcome};
 
@@ -26,14 +27,25 @@ pub fn import_source(config: ImportConfig) -> Result<ImportReport> {
 
 pub fn import_source_with_clock(config: ImportConfig, clock: &impl Clock) -> Result<ImportReport> {
     if config.dry_run {
-        dry_run_import(config, clock)
+        if config.store_root.path().exists() {
+            let _lock = StoreRunLock::acquire(&config.store_root, "import", LockMode::Shared)?;
+            dry_run_import(config, clock)
+        } else {
+            tracing::trace!(store = ?config.store_root.path(), command = "import", "skipping store coordination for missing-store dry run");
+            dry_run_import(config, clock)
+        }
     } else {
+        match std::fs::create_dir(config.store_root.path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let _lock = StoreRunLock::acquire(&config.store_root, "import", LockMode::Exclusive)?;
         real_import(config, clock)
     }
 }
 
 fn real_import(config: ImportConfig, clock: &impl Clock) -> Result<ImportReport> {
-    std::fs::create_dir_all(config.store_root.path())?;
     let store = Store::new(config.store_root.clone());
     store.prepare_for_import()?;
     let mut catalog = Catalog::open_or_initialize(&config.db_path)?;

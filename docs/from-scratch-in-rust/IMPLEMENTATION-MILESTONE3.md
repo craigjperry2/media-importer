@@ -216,7 +216,8 @@ SQLite can provide a consistent database read transaction, but the database and
 CAS filesystem cannot be snapshotted atomically by this command. A concurrent
 import can therefore appear temporarily as an orphan CAS file or a missing
 cataloged file. Document this precondition in CLI help and user-facing docs.
-Run-lock enforcement is deferred until the catalog-backed locking milestone.
+Run-lock enforcement is provided by milestone 5's same-store advisory
+directory lock.
 
 ## Catalog Access And Checks
 
@@ -504,7 +505,6 @@ the catalog/CAS classification and exit semantics established here. Still
 deferred:
 
 - repair and quarantine workflows;
-- catalog-backed run locking;
 - metadata-skip optimization;
 - mount-point workers and parallel audit hashing;
 - single-writer database thread;

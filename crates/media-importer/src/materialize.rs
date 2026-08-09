@@ -10,6 +10,8 @@ use walkdir::WalkDir;
 use crate::catalog::ReadOnlyCatalog;
 use crate::config::BuildTreeConfig;
 use crate::paths::{BlobHash, output_relative_path, points_inside_blobs, relative_symlink_target};
+use crate::run_lock::{LockMode, StoreRunLock};
+use crate::test_probe;
 
 #[derive(Clone, Debug, Default)]
 pub struct BuildTreeReport {
@@ -40,12 +42,23 @@ struct Plan {
 }
 
 pub fn build_tree(config: BuildTreeConfig) -> Result<BuildTreeReport> {
+    let mode = if config.dry_run {
+        LockMode::Shared
+    } else {
+        LockMode::Exclusive
+    };
+    let _lock = StoreRunLock::acquire(&config.store_root, "build-tree", mode)?;
     let plan = plan(&config)?;
+    test_probe::pause("build-tree-planned")?;
     if config.dry_run {
-        return Ok(plan.report);
+        let report = plan.report;
+        test_probe::pause("build-tree-report-constructed")?;
+        return Ok(report);
     }
     apply(&config, &plan)?;
-    Ok(plan.report)
+    let report = plan.report;
+    test_probe::pause("build-tree-applied-report-constructed")?;
+    Ok(report)
 }
 
 fn plan(config: &BuildTreeConfig) -> Result<Plan> {

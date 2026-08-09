@@ -66,3 +66,15 @@ These preferences apply to SQLite usage in this project.
   into a temp or in-memory database before inspection. Do not copy
   `catalog.sqlite`, `-wal`, and `-shm` files independently; that is not a safe
   snapshot without filesystem-level atomicity.
+
+### Same-Store Coordinated Read Snapshots
+
+As a narrow exception to the preceding guidance, a shared reader that already
+holds the application's same-store advisory lock may copy the main catalog
+database and its WAL, if non-empty, into a private temporary directory and
+open only that copy. Never copy the SHM sidecar. SQLite may create SHM beside
+the temporary copy, but the source catalog, WAL, and SHM must remain untouched.
+
+This exception is safe only against cooperating commands using the same store
+lock. External SQLite writers or filesystem editors are unsupported and must
+not be treated as safe snapshot participants.

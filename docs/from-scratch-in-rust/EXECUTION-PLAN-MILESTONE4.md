@@ -46,7 +46,10 @@ or time grace in schema version 1.
 
 ### Quiescence Is A Hard, Unenforced Precondition
 
-Milestone 4 does not add a run lock. Correctness therefore requires that no
+Before milestone 5, milestone 4 did not add a run lock. Milestone 5 now
+provides same-store advisory coordination, so cooperating commands no longer
+require manual quiescence. External writers remain unsupported. Correctness at
+the milestone-4 boundary therefore required that no
 `import`, `gc`, or external catalog/CAS writer touches the selected store and
 catalog from path validation until the command returns.
 

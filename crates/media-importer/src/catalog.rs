@@ -1,4 +1,5 @@
 use std::fs;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -6,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, bail, eyre};
 use rusqlite::{
-    Connection, MAIN_DB, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 
 use crate::integrity::{IntegrityFinding as AuditFinding, push_finding};
@@ -48,8 +49,30 @@ pub struct CatalogAuditSnapshot {
     pub findings: Vec<AuditFinding>,
 }
 
+struct SharedReadConnection {
+    connection: Connection,
+    temp_dir: Option<PathBuf>,
+}
+
+impl Deref for SharedReadConnection {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl Drop for SharedReadConnection {
+    fn drop(&mut self) {
+        if let Some(temp_dir) = self.temp_dir.take() {
+            let _ = fs::remove_dir_all(temp_dir);
+        }
+    }
+}
+
 pub fn inspect_catalog_for_audit(path: &Path) -> Result<CatalogAuditSnapshot> {
     let connection = open_existing_read_only(path, "auditing")?;
+    require_current_schema(&connection)?;
     connection
         .execute_batch(AUDIT_BEGIN_SQL)
         .wrap_err("begin audit read transaction")?;
@@ -62,6 +85,7 @@ pub fn inspect_catalog_for_audit(path: &Path) -> Result<CatalogAuditSnapshot> {
 
 pub fn inspect_catalog_for_gc_dry_run(path: &Path) -> Result<CatalogAuditSnapshot> {
     let connection = open_existing_read_only(path, "garbage collection dry run")?;
+    require_current_schema(&connection)?;
     connection
         .execute_batch(AUDIT_BEGIN_SQL)
         .wrap_err("begin GC dry-run read transaction")?;
@@ -72,29 +96,12 @@ pub fn inspect_catalog_for_gc_dry_run(path: &Path) -> Result<CatalogAuditSnapsho
     Ok(snapshot)
 }
 
-fn open_existing_read_only(path: &Path, operation: &str) -> Result<Connection> {
-    let metadata =
-        fs::symlink_metadata(path).wrap_err_with(|| format!("stat catalog database {:?}", path))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        bail!("catalog database must be a real regular file: {:?}", path);
-    }
-    let wal = sidecar_path(path, "-wal");
-    let shm = sidecar_path(path, "-shm");
-    let wal_metadata = sidecar_metadata(&wal, "WAL")?;
-    let nonempty_wal = wal_metadata.is_some_and(|metadata| metadata.len() > 0);
-    if nonempty_wal {
-        if sidecar_metadata(&shm, "SHM")?.is_none() {
-            bail!(
-                "catalog has a non-empty WAL without a usable SHM; cleanly close/checkpoint a writer before auditing"
-            );
-        }
-        fs::File::open(&wal).wrap_err("open existing catalog WAL read-only")?;
-        fs::File::open(&shm).wrap_err("open existing catalog SHM read-only")?;
-    }
+fn open_existing_read_only(path: &Path, operation: &str) -> Result<SharedReadConnection> {
+    let (open_path, temp_dir, immutable) = snapshot_catalog_for_shared_read(path, operation)?;
     // `immutable=1` is safe only in the no-WAL branch: audit requires a
     // quiescent catalog, and there are no committed frames outside the main
     // database to ignore. It also prevents SQLite from creating sidecars.
-    let uri = sqlite_read_only_uri(path, !nonempty_wal)?;
+    let uri = sqlite_read_only_uri(&open_path, immutable)?;
     let connection = Connection::open_with_flags(
         uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -102,13 +109,20 @@ fn open_existing_read_only(path: &Path, operation: &str) -> Result<Connection> {
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .wrap_err_with(|| format!("open read-only catalog database for {operation} {:?}", path))?;
+    Ok(SharedReadConnection {
+        connection,
+        temp_dir: Some(temp_dir),
+    })
+}
+
+fn require_current_schema(connection: &Connection) -> Result<()> {
     let version: i64 = connection
         .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
         .wrap_err("read catalog schema version")?;
     if version != CURRENT_SCHEMA_VERSION {
         bail!("catalog schema version {version} is unsupported; expected {CURRENT_SCHEMA_VERSION}");
     }
-    Ok(connection)
+    Ok(())
 }
 
 fn inspect_catalog_connection(
@@ -340,6 +354,71 @@ fn sidecar_metadata(path: &Path, label: &str) -> Result<Option<fs::Metadata>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => {
             Err(error).wrap_err_with(|| format!("stat catalog {label} sidecar {:?}", path))
+        }
+    }
+}
+
+/// Make a private SQLite snapshot for a same-store-lock-protected shared read.
+///
+/// The caller's shared store lock prevents cooperating commands from changing
+/// the source while the main database and any committed WAL are copied. SHM is
+/// deliberately never copied: it is SQLite coordination state, not durable
+/// database content, and SQLite may create it only beside this temporary copy.
+/// Direct external writers remain unsupported by this narrow snapshot policy.
+fn snapshot_catalog_for_shared_read(
+    path: &Path,
+    operation: &str,
+) -> Result<(PathBuf, PathBuf, bool)> {
+    if !path.exists() {
+        bail!("catalog database does not exist: {:?}", path);
+    }
+    let metadata =
+        fs::symlink_metadata(path).wrap_err_with(|| format!("stat catalog database {:?}", path))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("catalog database must be a real regular file: {:?}", path);
+    }
+
+    let wal = sidecar_path(path, "-wal");
+    let wal_metadata = sidecar_metadata(&wal, "WAL")?;
+    let nonempty_wal = wal_metadata.is_some_and(|metadata| metadata.len() > 0);
+    copy_catalog_snapshot(path, nonempty_wal, operation)
+}
+
+fn copy_catalog_snapshot(
+    path: &Path,
+    copy_wal: bool,
+    operation: &str,
+) -> Result<(PathBuf, PathBuf, bool)> {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "media-importer-shared-read-{}",
+        uuid::Uuid::new_v4()
+    ));
+    fs::create_dir(&temp_dir)
+        .wrap_err_with(|| format!("create shared-read catalog temp directory {:?}", temp_dir))?;
+    let result = (|| {
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| eyre!("catalog path must name a file: {:?}", path))?;
+        let copied_db = temp_dir.join(file_name);
+        fs::copy(path, &copied_db)
+            .wrap_err_with(|| format!("copy catalog database {:?} to {:?}", path, copied_db))?;
+        if copy_wal {
+            let source = sidecar_path(path, "-wal");
+            let destination = sidecar_path(&copied_db, "-wal");
+            fs::copy(&source, &destination).wrap_err_with(|| {
+                format!(
+                    "copy catalog WAL for {operation} from {:?} to {:?}",
+                    source, destination
+                )
+            })?;
+        }
+        Ok((copied_db, temp_dir.clone(), !copy_wal))
+    })();
+    match result {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) => {
+            let _ = fs::remove_dir_all(&temp_dir);
+            Err(error)
         }
     }
 }
@@ -843,8 +922,7 @@ pub struct Catalog {
 }
 
 pub struct ReadOnlyCatalog {
-    connection: Connection,
-    temp_dir: Option<PathBuf>,
+    connection: SharedReadConnection,
 }
 
 impl Catalog {
@@ -954,11 +1032,7 @@ fn sqlite_u64(value: u64, label: &str) -> Result<i64> {
 
 impl ReadOnlyCatalog {
     pub fn open_for_materialization(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            bail!("catalog database does not exist: {:?}", path);
-        }
-        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .wrap_err_with(|| format!("open read-only catalog database {:?}", path))?;
+        let connection = open_existing_read_only(path, "build-tree materialization")?;
         let version: i64 = connection
             .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
             .wrap_err("read catalog schema version")?;
@@ -979,19 +1053,14 @@ impl ReadOnlyCatalog {
                 CURRENT_SCHEMA_VERSION
             );
         }
-        Ok(Self {
-            connection,
-            temp_dir: None,
-        })
+        Ok(Self { connection })
     }
 
     pub fn open_if_exists(path: &Path) -> Result<Option<Self>> {
         if !path.exists() {
             return Ok(None);
         }
-        let (open_path, temp_dir) = backup_catalog_for_read_only_access(path)?;
-        let connection = Connection::open_with_flags(&open_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .wrap_err_with(|| format!("open read-only catalog database {:?}", path))?;
+        let connection = open_existing_read_only(path, "import dry-run catalog snapshot")?;
         let version: i64 = connection
             .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
             .wrap_err("read catalog schema version")?;
@@ -1004,13 +1073,9 @@ impl ReadOnlyCatalog {
         }
         if version == 0 {
             drop(connection);
-            let _ = fs::remove_dir_all(temp_dir);
             return Ok(None);
         }
-        Ok(Some(Self {
-            connection,
-            temp_dir: Some(temp_dir),
-        }))
+        Ok(Some(Self { connection }))
     }
 
     pub fn source_observation_outcome(
@@ -1065,14 +1130,6 @@ impl ReadOnlyCatalog {
     }
 }
 
-impl Drop for ReadOnlyCatalog {
-    fn drop(&mut self) {
-        if let Some(temp_dir) = self.temp_dir.take() {
-            let _ = fs::remove_dir_all(temp_dir);
-        }
-    }
-}
-
 fn migrate(connection: &mut Connection) -> Result<()> {
     let version: i64 = connection
         .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
@@ -1096,36 +1153,4 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         .wrap_err("create catalog schema version 1")?;
     tx.commit().wrap_err("commit catalog schema migration")?;
     Ok(())
-}
-
-fn backup_catalog_for_read_only_access(path: &Path) -> Result<(PathBuf, PathBuf)> {
-    let temp_dir =
-        std::env::temp_dir().join(format!("media-importer-dry-run-{}", uuid::Uuid::new_v4()));
-    fs::create_dir(&temp_dir)
-        .wrap_err_with(|| format!("create dry-run catalog temp directory {:?}", temp_dir))?;
-
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| eyre!("catalog path must name a file: {:?}", path))?;
-    let copied_db = temp_dir.join(file_name);
-
-    let source = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
-        Ok(source) => source,
-        Err(error) => {
-            let _ = fs::remove_dir_all(&temp_dir);
-            return Err(error)
-                .wrap_err_with(|| format!("open source catalog database for backup {:?}", path));
-        }
-    };
-    if let Err(error) = source.backup(MAIN_DB, &copied_db, None) {
-        let _ = fs::remove_dir_all(&temp_dir);
-        return Err(error).wrap_err_with(|| {
-            format!(
-                "backup catalog database {:?} to dry-run temp path {:?}",
-                path, copied_db
-            )
-        });
-    }
-
-    Ok((copied_db, temp_dir))
 }

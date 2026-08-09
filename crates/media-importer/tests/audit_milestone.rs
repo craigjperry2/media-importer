@@ -130,7 +130,7 @@ fn immutable_uri_percent_encodes_explicit_catalog_paths() {
 }
 
 #[test]
-fn audit_observes_committed_wal_and_rejects_wal_without_shm() {
+fn audit_observes_committed_wal_without_changing_source_sidecars() {
     let temp = TempDir::new().unwrap();
     import(&temp);
     let db = temp.child("store/catalog.sqlite");
@@ -161,16 +161,45 @@ fn audit_observes_committed_wal_and_rejects_wal_without_shm() {
             .len()
             > 0
     );
+    let wal = std::path::PathBuf::from(format!("{}-wal", db.path().display()));
+    let shm = std::path::PathBuf::from(format!("{}-shm", db.path().display()));
+    let before_wal = snapshot(&wal);
+    let before_shm = snapshot(&shm);
     audit(&temp)
         .success()
         .stdout(predicate::str::contains("Catalog blobs: 2"));
+    assert_eq!(before_wal, snapshot(&wal));
+    assert_eq!(before_shm, snapshot(&shm));
     drop(connection);
+}
 
-    fs::write(format!("{}-wal", db.path().display()), b"not-a-real-wal").unwrap();
-    let _ = fs::remove_file(format!("{}-shm", db.path().display()));
-    audit(&temp)
-        .code(1)
-        .stderr(predicate::str::contains("without a usable SHM"));
+#[test]
+fn audit_rejects_nonregular_wal_but_ignores_source_shm_without_mutating_it() {
+    let temp = TempDir::new().unwrap();
+    import(&temp);
+    let db = temp.child("store/catalog.sqlite");
+    let sidecar = format!("{}-wal", db.path().display());
+    fs::create_dir(&sidecar).unwrap();
+    let before = fs::metadata(&sidecar).unwrap().modified().unwrap();
+    audit(&temp).code(1).stderr(predicate::str::contains(
+        "sidecar must be a real regular file",
+    ));
+    assert!(Path::new(&sidecar).is_dir());
+    assert_eq!(before, fs::metadata(&sidecar).unwrap().modified().unwrap());
+
+    #[cfg(unix)]
+    {
+        let temp = TempDir::new().unwrap();
+        import(&temp);
+        let db = temp.child("store/catalog.sqlite");
+        let target = temp.child("sidecar-target");
+        target.write_binary(b"sidecar").unwrap();
+        let sidecar = format!("{}-shm", db.path().display());
+        std::os::unix::fs::symlink(target.path(), &sidecar).unwrap();
+        let before = fs::read_link(&sidecar).unwrap();
+        audit(&temp).success();
+        assert_eq!(before, fs::read_link(&sidecar).unwrap());
+    }
 }
 
 #[test]

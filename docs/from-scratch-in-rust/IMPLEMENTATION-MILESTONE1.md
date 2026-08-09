@@ -685,15 +685,10 @@ needs them. Do not add unused schema in milestone 1.
 
 ### Catalog Run Locking
 
-Future mutating commands should use a catalog-backed `run_locks` table, or an
-equivalent SQLite-backed lock, to reject accidental concurrent live runs against
-the same catalog.
-
-The lock should be acquired atomically before mutating work begins, record an
-owner token plus acquired/heartbeat timestamps, refresh during long runs, and be
-released on normal completion. Dry-run and read-only commands do not acquire the
-write lock. Stale lock breaking, waiting, and force-unlock behavior must be
-explicitly specified before implementation.
+Milestone 5 supersedes this deferred catalog-backed design with a
+kernel-managed advisory lock on the canonical store-root directory. Commands
+now participate in same-store coordination for their full behavior-level run;
+there is no catalog lock record, owner token, heartbeat, or stale-lock workflow.
 
 ### Concurrency And Writer Thread
 

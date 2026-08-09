@@ -31,7 +31,7 @@ enum Command {
     /// Reachability comes from catalog source records, not current source-file
     /// contents. Dry-run performs the complete read-only preflight. Present
     /// sweep candidates are fully hashed, so GC may be I/O intensive. The store
-    /// and catalog must remain quiescent for the entire command.
+    /// waits indefinitely for conflicting cooperating commands automatically.
     Gc(GcArgs),
 }
 

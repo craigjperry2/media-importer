@@ -447,7 +447,6 @@ These are intentionally deferred:
 - single-writer database thread
 - batched catalog writes
 - managed WAL checkpoints
-- catalog-backed run locking
 - progress dashboards
 - structured non-TTY logs
 - media metadata extraction

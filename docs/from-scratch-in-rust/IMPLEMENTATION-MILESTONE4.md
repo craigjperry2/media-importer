@@ -582,9 +582,10 @@ Use the same no-follow safety posture as audit:
 - immediately before unlink, re-check the final path without following it; and
 - never delete outside the canonical `StoreRoot::blob_path(BlobHash)`.
 
-Full directory-descriptor-relative traversal and catalog-backed run locking
-remain deferred. Parent-directory replacement by an external actor is outside
-the milestone 4 guarantee and is covered by the quiescence precondition.
+At the milestone 4 boundary, full directory-descriptor-relative traversal and
+run locking remained deferred. Milestone 5 implements same-store advisory run
+locking; parent-directory replacement by an external actor remains outside the
+guarantee.
 
 The writable SQLite transaction prevents ordinary concurrent catalog writes
 from silently changing the plan, but it does not make concurrent CAS mutation
@@ -735,7 +736,6 @@ Milestone 4 does not include:
 - browse-tree rebuilding or cleanup as part of GC;
 - shard-directory pruning;
 - full rehashing of non-candidate blobs;
-- catalog-backed run locking;
 - directory-descriptor-relative filesystem mutation;
 - globally atomic SQLite/filesystem deletion;
 - JSON or machine-versioned output;
@@ -750,7 +750,6 @@ Milestone 4 does not include:
 
 Likely follow-up work includes:
 
-- catalog-backed run locking for all mutating commands;
 - explicit source-record management and deletion policy;
 - repair or quarantine workflows for orphans and corrupt blobs;
 - configurable retention periods;

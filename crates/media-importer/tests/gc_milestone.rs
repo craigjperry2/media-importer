@@ -9,7 +9,7 @@ use predicates::prelude::*;
 use rusqlite::Connection;
 
 #[test]
-fn gc_help_documents_lifecycle_hashing_dry_run_and_quiescence() {
+fn gc_help_documents_lifecycle_hashing_dry_run_and_automatic_waiting() {
     let output = Command::cargo_bin("media-importer")
         .unwrap()
         .args(["gc", "--help"])
@@ -19,7 +19,7 @@ fn gc_help_documents_lifecycle_hashing_dry_run_and_quiescence() {
         .stdout(predicate::str::contains("marked before this run"))
         .stdout(predicate::str::contains("fully hashed"))
         .stdout(predicate::str::contains("Dry-run"))
-        .stdout(predicate::str::contains("quiescent"))
+        .stdout(predicate::str::contains("waits indefinitely"))
         .get_output()
         .stdout
         .clone();
@@ -748,7 +748,7 @@ fn enumerable_semantic_schema_finding_blocks_all_gc_mutation() {
 }
 
 #[test]
-fn dry_run_observes_committed_wal_and_rejects_nonempty_wal_without_shm() {
+fn dry_run_observes_committed_wal_without_changing_source_sidecars() {
     let wal_case = imported("main");
     let db = wal_case.child("store/catalog.sqlite");
     let connection = Connection::open(db.path()).unwrap();
@@ -771,21 +771,6 @@ fn dry_run_observes_committed_wal_and_rejects_nonempty_wal_without_shm() {
         .stdout(predicate::str::contains(format!("WOULD_MARK {hash}")))
         .stdout(predicate::str::contains("Catalog blobs: 2"));
     drop(connection);
-
-    let unsafe_case = imported("unsafe-wal");
-    let db = unsafe_case.child("store/catalog.sqlite");
-    let before = durable_state(&unsafe_case);
-    let wal = sidecar(db.path(), "-wal");
-    let shm = sidecar(db.path(), "-shm");
-    fs::write(&wal, b"not-a-real-wal").unwrap();
-    let _ = fs::remove_file(sidecar(db.path(), "-shm"));
-    gc(&unsafe_case, &["--dry-run"])
-        .code(1)
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("without a usable SHM"));
-    assert_eq!(fs::read(&wal).unwrap(), b"not-a-real-wal");
-    assert!(!shm.exists());
-    assert_eq!(durable_state(&unsafe_case), before);
 }
 
 #[test]

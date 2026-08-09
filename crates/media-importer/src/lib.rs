@@ -8,5 +8,8 @@ pub mod ingest;
 pub mod integrity;
 pub mod materialize;
 pub mod paths;
+pub mod run_lock;
 pub mod scanner;
 pub mod store;
+
+mod test_probe;

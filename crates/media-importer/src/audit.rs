@@ -7,6 +7,7 @@ use crate::catalog::inspect_catalog_for_audit;
 use crate::config::AuditConfig;
 use crate::hashing::hash_open_file;
 use crate::integrity::{IntegrityFinding, push_finding, sort_and_deduplicate};
+use crate::run_lock::{LockMode, StoreRunLock};
 use crate::store::{inspect_cas, open_blob_no_follow};
 
 pub type AuditFinding = IntegrityFinding;
@@ -27,6 +28,7 @@ impl AuditReport {
 }
 
 pub fn audit_store(config: AuditConfig) -> Result<AuditReport> {
+    let _lock = StoreRunLock::acquire(&config.store_root, "audit", LockMode::Shared)?;
     let snapshot = inspect_catalog_for_audit(&config.db_path)?;
     let cas = inspect_cas(&config.store_root)?;
     let mut findings = snapshot.findings;

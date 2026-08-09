@@ -1,9 +1,8 @@
 //! Mark-and-sweep garbage collection.
 //!
-//! Correctness requires the selected store and catalog to remain quiescent
-//! from path validation until this operation returns. The SQLite reservation
-//! protects the catalog snapshot, but milestone 4 deliberately has no CAS run
-//! lock.
+//! Cooperating commands hold the store's exclusive run lock for the complete
+//! collection operation. SQLite's reservation still protects the catalog
+//! transaction; non-cooperating external writers remain outside that scope.
 
 use std::fs;
 
@@ -19,10 +18,12 @@ use crate::config::GcConfig;
 use crate::hashing::hash_open_file;
 use crate::integrity::{IntegrityFinding, push_finding, sort_and_deduplicate};
 use crate::paths::BlobHash;
+use crate::run_lock::{LockMode, StoreRunLock};
 use crate::store::{
     BlobFileIdentity, inspect_cas, open_blob_no_follow, remove_blob_file,
     revalidate_blob_for_removal, sync_blob_parent, sync_nearest_existing_blob_parent,
 };
+use crate::test_probe;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum GcActionKind {
@@ -236,13 +237,21 @@ fn collect_garbage_with_dependencies(
         store = ?config.store_root.path(),
         catalog = ?config.db_path,
         dry_run = config.dry_run,
-        "starting garbage collection; store and catalog must remain quiescent"
+        "starting garbage collection; coordinating automatically with cooperating commands"
     );
-    if config.dry_run {
+    let mode = if config.dry_run {
+        LockMode::Shared
+    } else {
+        LockMode::Exclusive
+    };
+    let _lock = StoreRunLock::acquire(&config.store_root, "gc", mode)?;
+    let outcome = if config.dry_run {
         collect_dry_run(config)
     } else {
         collect_real(config, clock, mutator)
-    }
+    }?;
+    test_probe::pause("gc-outcome-constructed")?;
+    Ok(outcome)
 }
 
 fn collect_dry_run(config: GcConfig) -> Result<GcOutcome> {
@@ -295,6 +304,7 @@ fn collect_real(
     let transaction = catalog.begin_immediate()?;
     let snapshot = transaction.inspect_and_snapshot()?;
     let preflight = run_preflight(&config, snapshot)?;
+    test_probe::pause("gc-preflight-complete")?;
     if !preflight.report.findings.is_empty() {
         return Ok(GcOutcome::Blocked(preflight.report));
     }
@@ -684,9 +694,20 @@ fn apply_plan(
         progress = next_progress;
     }
 
+    if let Err(error) = test_probe::pause_or_fail("gc-before-commit") {
+        return Ok(commit_partial(
+            transaction,
+            preflight.report,
+            staged_actions,
+            progress,
+            error,
+        ));
+    }
+
     match transaction.commit() {
         Ok(()) => {
             finish_committed(&mut preflight.report, staged_actions, progress);
+            test_probe::pause("gc-commit-complete")?;
             Ok(GcOutcome::Complete(preflight.report))
         }
         Err(error) => Ok(GcOutcome::Incomplete {

@@ -54,14 +54,34 @@ media-importer gc \
 
 When `--db` is omitted, commands use `STORE_ROOT/catalog.sqlite`.
 
+### Single-node command coordination
+
+Commands that use the same canonical store root coordinate automatically with
+an operating-system advisory lock on that directory. Conflicting commands wait
+indefinitely for the current cooperating command to finish; the operating
+system releases the lock if its process exits. There is no lock file or
+catalog lock row.
+
+| Command | Mode |
+| --- | --- |
+| `import`, `build-tree`, `gc` | exclusive |
+| `import --dry-run` (existing store), `build-tree --dry-run`, `audit`, `gc --dry-run` | shared |
+
+Shared commands may overlap each other. An `import --dry-run` whose store does
+not exist is deliberately unlocked and creates nothing. This is cooperative,
+single-node coordination only: manual filesystem edits, direct SQLite clients,
+and other non-cooperating programs remain unsafe. Different stores that share
+an external catalog or browse-tree path are unsupported and uncoordinated.
+
 ### Audit contract
 
 Audit validates the SQLite schema, catalog domain values, foreign keys, and
 both directions of the catalog/CAS relationship. It fully rehashes every
 canonical CAS blob and can therefore be I/O intensive.
 
-The store and catalog must remain quiescent throughout an audit. Do not run
-`import` or another store-mutating process concurrently.
+Cooperating `media-importer` commands using the same store coordinate
+automatically. External catalog and filesystem writers remain unsafe during an
+audit.
 
 Audit only reports problems. It never creates, repairs, deletes, migrates, or
 checkpoints durable store or catalog state. Catalog blobs with `deleted_at_ms`
@@ -119,10 +139,10 @@ sizes for finalized present sweeps; ZFS compression, snapshots, deduplication,
 sparse allocation, reflinks, or hard links can make physical space recovery
 different.
 
-The store and catalog must remain quiescent from command validation until GC
-returns. Do not run `import`, another `gc`, or external catalog/CAS writers
-against the same store concurrently. The SQLite write reservation protects the
-catalog snapshot, but milestone 4 has no cross-filesystem run lock.
+Cooperating `media-importer` commands using the same store coordinate
+automatically. Do not run external catalog/CAS writers against that store
+concurrently. SQLite's write reservation remains part of GC's catalog
+transaction semantics.
 
 GC exit statuses are:
 
