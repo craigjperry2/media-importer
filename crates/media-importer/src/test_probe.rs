@@ -68,3 +68,45 @@ pub(crate) fn pause_or_fail(stage: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// Whether a private integration-test probe has enabled `stage`.
+pub(crate) fn enabled(stage: &str) -> Result<bool> {
+    let Some(specification) = std::env::var_os(PROBE_ENV) else {
+        return Ok(false);
+    };
+    let specification = specification
+        .into_string()
+        .map_err(|_| color_eyre::eyre::eyre!("{PROBE_ENV} must be valid Unicode"))?;
+    let Some((_, requested_stage)) = specification.rsplit_once('|') else {
+        bail!("{PROBE_ENV} must be PATH|STAGE");
+    };
+    Ok(requested_stage
+        .split(',')
+        .any(|candidate| candidate == stage))
+}
+
+/// Test-only lifecycle seam for verifying that callers join a worker which
+/// panics before it can report readiness. This has no effect unless the same
+/// private integration-test probe environment is configured.
+pub(crate) fn pause_or_panic(stage: &str) -> Result<()> {
+    pause(stage)?;
+    let Some(specification) = std::env::var_os(PROBE_ENV) else {
+        return Ok(());
+    };
+    let specification = specification
+        .into_string()
+        .map_err(|_| color_eyre::eyre::eyre!("{PROBE_ENV} must be valid Unicode"))?;
+    let Some((directory, requested_stage)) = specification.rsplit_once('|') else {
+        bail!("{PROBE_ENV} must be PATH|STAGE");
+    };
+    if requested_stage
+        .split(',')
+        .any(|candidate| candidate == stage)
+        && PathBuf::from(directory)
+            .join(format!("{stage}.panic"))
+            .exists()
+    {
+        panic!("injected lifecycle probe panic at {stage}");
+    }
+    Ok(())
+}

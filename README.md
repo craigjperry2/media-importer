@@ -80,6 +80,15 @@ single-node coordination only: manual filesystem edits, direct SQLite clients,
 and other non-cooperating programs remain unsafe. Different stores that share
 an external catalog or browse-tree path are unsupported and uncoordinated.
 
+### Catalog writer operation
+
+Each mutating import or GC command owns one catalog-writer thread for its full
+run. Import observations commit in bounded batches; the writer disables SQLite
+automatic WAL checkpoints and performs explicit passive checkpoints after
+configured batches and during clean shutdown. No command-line tuning flags are
+exposed for these internal limits. Read-only commands and all dry runs do not
+start a writer or checkpoint the catalog.
+
 ### Audit contract
 
 Audit validates the SQLite schema, catalog domain values, foreign keys, and

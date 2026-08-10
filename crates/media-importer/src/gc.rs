@@ -11,8 +11,8 @@ use color_eyre::eyre::{WrapErr, eyre};
 use tracing::info;
 
 use crate::catalog::{
-    CatalogAuditSnapshot, CatalogBlob, Clock, GcCatalog, GcTransaction, SystemClock,
-    inspect_catalog_for_gc_dry_run,
+    CatalogAuditSnapshot, CatalogBlob, CatalogWriterConfig, CatalogWriterHandle, Clock,
+    GcWriteSession, SystemClock, inspect_catalog_for_gc_dry_run,
 };
 use crate::config::GcConfig;
 use crate::hashing::hash_open_file;
@@ -300,15 +300,77 @@ fn collect_real(
     clock: &dyn Clock,
     mutator: &dyn GcStoreMutator,
 ) -> Result<GcOutcome> {
-    let mut catalog = GcCatalog::open_existing_for_gc(&config.db_path)?;
-    let transaction = catalog.begin_immediate()?;
-    let snapshot = transaction.inspect_and_snapshot()?;
-    let preflight = run_preflight(&config, snapshot)?;
-    test_probe::pause("gc-preflight-complete")?;
-    if !preflight.report.findings.is_empty() {
-        return Ok(GcOutcome::Blocked(preflight.report));
+    let writer = CatalogWriterHandle::spawn_existing_for_gc(
+        config.db_path.clone(),
+        CatalogWriterConfig::default(),
+    )?;
+    let (session, snapshot) = match writer.begin_gc() {
+        Ok(value) => value,
+        Err(error) => {
+            return finish_writer_after_gc_error(writer, error);
+        }
+    };
+    let preflight = match run_preflight(&config, snapshot) {
+        Ok(value) => value,
+        Err(error) => {
+            let terminal = session.rollback();
+            return finish_writer_after_gc_terminal_error(writer, error, terminal);
+        }
+    };
+    if let Err(error) = test_probe::pause("gc-preflight-complete") {
+        let terminal = session.rollback();
+        return finish_writer_after_gc_terminal_error(writer, error, terminal);
     }
-    apply_plan(config, transaction, preflight, clock, mutator)
+    if !preflight.report.findings.is_empty() {
+        match session.rollback() {
+            Ok(()) => {
+                writer.finish()?;
+                return Ok(GcOutcome::Blocked(preflight.report));
+            }
+            Err(error) => return finish_writer_after_gc_error(writer, error),
+        }
+    }
+    let result = apply_plan(config, session, preflight, clock, mutator);
+    let finish = writer.finish();
+    match (result, finish) {
+        (Ok(outcome), Ok(_)) => Ok(outcome),
+        (Ok(_), Err(writer_error)) => Err(writer_error),
+        (Err(operation_error), Ok(_)) => Err(operation_error),
+        // A terminal writer error is canonical; the GC operation error remains
+        // attached as secondary context for diagnosis.
+        (Err(operation_error), Err(writer_error)) => Err(writer_error.wrap_err(format!(
+            "garbage collection operation also failed while catalog writer terminated: {operation_error:#}"
+        ))),
+    }
+}
+
+fn finish_writer_after_gc_error<T>(
+    writer: CatalogWriterHandle,
+    error: color_eyre::Report,
+) -> Result<T> {
+    match writer.finish() {
+        Ok(_) => Err(error),
+        // The writer owns the mutation failure. If it reports a terminal
+        // failure, retain that source as canonical and attach the operation
+        // failure as secondary diagnosis.
+        Err(writer_error) => Err(writer_error.wrap_err(format!(
+            "garbage collection operation also failed before catalog writer shutdown: {error:#}"
+        ))),
+    }
+}
+
+fn finish_writer_after_gc_terminal_error<T>(
+    writer: CatalogWriterHandle,
+    error: color_eyre::Report,
+    terminal: Result<()>,
+) -> Result<T> {
+    let error = match terminal {
+        Ok(()) => error,
+        Err(terminal_error) => error.wrap_err(format!(
+            "garbage collection also failed to terminate its writer session: {terminal_error:#}"
+        )),
+    };
+    finish_writer_after_gc_error(writer, error)
 }
 
 fn run_preflight(config: &GcConfig, snapshot: CatalogAuditSnapshot) -> Result<Preflight> {
@@ -521,7 +583,7 @@ fn build_plan(snapshot: &CatalogAuditSnapshot) -> Result<(GcPlan, u64)> {
 
 fn apply_plan(
     config: GcConfig,
-    transaction: GcTransaction<'_>,
+    transaction: GcWriteSession<'_>,
     mut preflight: Preflight,
     clock: &dyn Clock,
     mutator: &dyn GcStoreMutator,
@@ -544,22 +606,31 @@ fn apply_plan(
         .map_err(|error| eyre!("reserve completed GC actions: {error}"))?;
 
     let mut progress = StagedProgress::default();
+    let mut sweep_mutations_started = false;
     let marked_at_ms = clock.now_ms();
     for blob in &preflight.plan.marks {
         let next_progress = match progress.checked_mark() {
             Ok(next) => next,
             Err(error) => {
-                return Ok(GcOutcome::Incomplete {
-                    report: preflight.report,
+                return abort_apply(
+                    transaction,
+                    preflight.report,
+                    staged_actions,
+                    progress,
+                    sweep_mutations_started,
                     error,
-                });
+                );
             }
         };
         if let Err(error) = transaction.stage_mark(blob, marked_at_ms) {
-            return Ok(GcOutcome::Incomplete {
-                report: preflight.report,
+            return abort_apply(
+                transaction,
+                preflight.report,
+                staged_actions,
+                progress,
+                sweep_mutations_started,
                 error,
-            });
+            );
         }
         staged_actions.push(action_for(GcActionKind::Mark, blob, None));
         progress = next_progress;
@@ -568,17 +639,25 @@ fn apply_plan(
         let next_progress = match progress.checked_resurrection() {
             Ok(next) => next,
             Err(error) => {
-                return Ok(GcOutcome::Incomplete {
-                    report: preflight.report,
+                return abort_apply(
+                    transaction,
+                    preflight.report,
+                    staged_actions,
+                    progress,
+                    sweep_mutations_started,
                     error,
-                });
+                );
             }
         };
         if let Err(error) = transaction.stage_resurrection(blob) {
-            return Ok(GcOutcome::Incomplete {
-                report: preflight.report,
+            return abort_apply(
+                transaction,
+                preflight.report,
+                staged_actions,
+                progress,
+                sweep_mutations_started,
                 error,
-            });
+            );
         }
         staged_actions.push(action_for(GcActionKind::Resurrect, blob, None));
         progress = next_progress;
@@ -589,13 +668,14 @@ fn apply_plan(
             match progress.checked_sweep(candidate.blob.size_bytes, candidate.source_state) {
                 Ok(next) => next,
                 Err(error) => {
-                    return Ok(commit_partial(
+                    return abort_apply(
                         transaction,
                         preflight.report,
                         staged_actions,
                         progress,
+                        sweep_mutations_started,
                         error,
-                    ));
+                    );
                 }
             };
         let next_physical = if candidate.source_state == SweepSourceState::Present {
@@ -605,13 +685,14 @@ fn apply_plan(
             ) {
                 Ok(next) => Some(next),
                 Err(error) => {
-                    return Ok(commit_partial(
+                    return abort_apply(
                         transaction,
                         preflight.report,
                         staged_actions,
                         progress,
+                        sweep_mutations_started,
                         error,
-                    ));
+                    );
                 }
             }
         } else {
@@ -620,37 +701,43 @@ fn apply_plan(
         match candidate.source_state {
             SweepSourceState::Present => {
                 let Some(identity) = candidate.identity.as_ref() else {
-                    return Ok(commit_partial(
+                    return abort_apply(
                         transaction,
                         preflight.report,
                         staged_actions,
                         progress,
+                        sweep_mutations_started,
                         eyre!("missing preflight identity for {}", candidate.blob.hash),
-                    ));
+                    );
                 };
                 if let Err(error) =
                     mutator.revalidate_present(&config, &candidate.blob.hash, identity)
                 {
-                    return Ok(commit_partial(
+                    return abort_apply(
                         transaction,
                         preflight.report,
                         staged_actions,
                         progress,
+                        sweep_mutations_started,
                         error,
-                    ));
+                    );
                 }
                 if let Err(error) = mutator.unlink_present(&config, &candidate.blob.hash) {
-                    return Ok(commit_partial(
+                    // An unlink error does not establish durable sweep progress;
+                    // retain M4's all-or-nothing mark/resurrection boundary.
+                    return abort_apply(
                         transaction,
                         preflight.report,
                         staged_actions,
                         progress,
+                        sweep_mutations_started,
                         error,
-                    ));
+                    );
                 }
                 next_physical
                     .expect("present sweep candidates have checked physical progress")
                     .assign_to(&mut preflight.report);
+                sweep_mutations_started = true;
                 if let Err(error) = mutator.sync_present_parent(&config, &candidate.blob.hash) {
                     return Ok(commit_partial(
                         transaction,
@@ -663,28 +750,30 @@ fn apply_plan(
             }
             SweepSourceState::AlreadyAbsent => {
                 if let Err(error) = mutator.sync_absent(&config, &candidate.blob.hash) {
-                    return Ok(commit_partial(
+                    return abort_apply(
                         transaction,
                         preflight.report,
                         staged_actions,
                         progress,
+                        sweep_mutations_started,
                         error,
-                    ));
+                    );
                 }
             }
         }
 
         if let Err(error) = transaction.stage_sweep(&candidate.blob) {
-            return Ok(commit_partial(
+            return abort_apply(
                 transaction,
                 preflight.report,
                 staged_actions,
                 progress,
+                sweep_mutations_started,
                 error.wrap_err(format!(
                     "CAS file for {} may already be absent; a later GC can resume the interrupted sweep",
                     candidate.blob.hash
                 )),
-            ));
+            );
         }
         staged_actions.push(action_for(
             GcActionKind::Sweep,
@@ -692,16 +781,18 @@ fn apply_plan(
             Some(candidate.source_state),
         ));
         progress = next_progress;
+        sweep_mutations_started = true;
     }
 
     if let Err(error) = test_probe::pause_or_fail("gc-before-commit") {
-        return Ok(commit_partial(
+        return abort_apply(
             transaction,
             preflight.report,
             staged_actions,
             progress,
+            sweep_mutations_started,
             error,
-        ));
+        );
     }
 
     match transaction.commit() {
@@ -717,14 +808,45 @@ fn apply_plan(
     }
 }
 
+/// Until the first sweep mutation, M4 requires GC to leave no durable catalog
+/// actions behind.  In particular, a failed mark, resurrection, revalidation,
+/// or attempted unlink must not commit earlier staged marks/resurrections.
+fn abort_apply(
+    transaction: GcWriteSession<'_>,
+    report: GcReport,
+    staged_actions: Vec<GcAction>,
+    progress: StagedProgress,
+    sweep_mutations_started: bool,
+    operation_error: color_eyre::Report,
+) -> Result<GcOutcome> {
+    if sweep_mutations_started {
+        return Ok(commit_partial(
+            transaction,
+            report,
+            staged_actions,
+            progress,
+            operation_error,
+        ));
+    }
+    match transaction.rollback() {
+        Ok(()) => Ok(GcOutcome::Incomplete {
+            report,
+            error: operation_error,
+        }),
+        Err(cleanup_error) => Err(eyre!(
+            "{operation_error:#}; additionally, GC rollback cleanup failed: {cleanup_error:#}"
+        )),
+    }
+}
+
 fn commit_partial(
-    transaction: GcTransaction<'_>,
+    transaction: GcWriteSession<'_>,
     mut report: GcReport,
     staged_actions: Vec<GcAction>,
     progress: StagedProgress,
     mutation_error: color_eyre::Report,
 ) -> GcOutcome {
-    match transaction.commit() {
+    match transaction.commit_partial() {
         Ok(()) => {
             finish_committed(&mut report, staged_actions, progress);
             GcOutcome::Incomplete {
@@ -1016,6 +1138,54 @@ mod tests {
             assert_eq!(report.cas_files_removed, 1);
             assert_eq!(catalog_blob_count(&config.db_path), 0);
         }
+    }
+
+    #[test]
+    fn pre_sweep_failure_rolls_back_staged_mark_and_resurrection() {
+        let temp = TempDir::new().expect("tempdir");
+        let store_path = temp.path().join("store");
+        fs::create_dir_all(store_path.join("blobs")).expect("create blobs root");
+        let store_root = StoreRoot::validate_existing(&store_path).expect("validate store");
+        let db_path = store_root.default_db_path();
+        let mut catalog = Catalog::open_or_initialize(&db_path).expect("create catalog");
+        let sweep = add_fixture_blob_at(&store_root, &mut catalog, b"sweep", "sweep");
+        let mark = add_fixture_blob_at(&store_root, &mut catalog, b"mark", "mark");
+        let resurrect = add_fixture_blob_at(&store_root, &mut catalog, b"resurrect", "resurrect");
+        drop(catalog);
+        for hash in [&sweep, &mark] {
+            test_support::delete_sources(&db_path, Some(hash)).expect("make blob unreachable");
+        }
+        for hash in [&sweep, &resurrect] {
+            test_support::set_mark(&db_path, hash, 1).expect("mark fixture blob");
+        }
+        let config = GcConfig {
+            store_root,
+            db_path: db_path.clone(),
+            dry_run: false,
+            chunk_size: NonZeroUsize::new(2).expect("non-zero"),
+        };
+
+        let outcome = collect_garbage_with_dependencies(
+            config.clone(),
+            &FixedClock,
+            &FailAtStage {
+                stage: FaultStage::Revalidate,
+            },
+        )
+        .expect("pre-sweep failure returns a partial report");
+        let GcOutcome::Incomplete { report, error } = outcome else {
+            panic!("expected incomplete outcome");
+        };
+        assert!(error.to_string().contains("injected revalidation failure"));
+        assert_eq!(report.completed_marks, 0);
+        assert_eq!(report.completed_resurrections, 0);
+        assert!(report.actions.is_empty());
+        assert_eq!(catalog_mark(&db_path, &mark), None);
+        assert_eq!(catalog_mark(&db_path, &resurrect), Some(1));
+        assert!(config.store_root.blob_path(&sweep).exists());
+
+        let recovery = collect_garbage(config).expect("pre-sweep rollback must release the lock");
+        assert!(matches!(recovery, GcOutcome::Complete(_)));
     }
 
     #[test]

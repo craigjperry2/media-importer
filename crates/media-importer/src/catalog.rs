@@ -1,21 +1,26 @@
 use std::fs;
+use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, bail, eyre};
-use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
-};
+use crossbeam_channel::{Receiver, Sender};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::integrity::{IntegrityFinding as AuditFinding, push_finding};
 use crate::paths::{BlobHash, SourceRelativePath};
+use crate::test_probe;
 use rusqlite::types::ValueRef;
 use std::collections::{BTreeSet, HashMap};
 
 const CURRENT_SCHEMA_VERSION: i64 = 1;
+// Telemetry is advisory. Keep it bounded so a caller that does not subscribe
+// cannot make a long import retain one event per record indefinitely.
+const EVENT_CHANNEL_CAPACITY: usize = 256;
 const AUDIT_BEGIN_SQL: &str = include_str!("catalog/sql/audit_begin.sql");
 const AUDIT_BLOBS_SQL: &str = include_str!("catalog/sql/audit_blobs.sql");
 const AUDIT_COMMIT_SQL: &str = include_str!("catalog/sql/audit_commit.sql");
@@ -32,7 +37,13 @@ const GC_MARK_SQL: &str = include_str!("catalog/sql/gc_mark.sql");
 const GC_RESURRECT_SQL: &str = include_str!("catalog/sql/gc_resurrect.sql");
 const GC_SNAPSHOT_SQL: &str = include_str!("catalog/sql/gc_snapshot.sql");
 const GC_SWEEP_SQL: &str = include_str!("catalog/sql/gc_sweep.sql");
+const GC_BEGIN_SQL: &str = include_str!("catalog/sql/gc_begin.sql");
+const GC_COMMIT_SQL: &str = include_str!("catalog/sql/gc_commit.sql");
+const GC_ROLLBACK_SQL: &str = include_str!("catalog/sql/gc_rollback.sql");
+const WAL_CHECKPOINT_PASSIVE_SQL: &str = include_str!("catalog/sql/wal_checkpoint_passive.sql");
+const TEST_INVALID_CHECKPOINT_SQL: &str = include_str!("catalog/sql/test_invalid_checkpoint.sql");
 const READ_JOURNAL_MODE_SQL: &str = include_str!("catalog/sql/read_journal_mode.sql");
+const READ_WAL_AUTOCHECKPOINT_SQL: &str = include_str!("catalog/sql/read_wal_autocheckpoint.sql");
 
 #[derive(Clone, Debug)]
 pub struct CatalogBlob {
@@ -697,137 +708,6 @@ impl Clock for SystemClock {
     }
 }
 
-pub struct GcCatalog {
-    connection: Connection,
-}
-
-pub struct GcTransaction<'connection> {
-    transaction: Transaction<'connection>,
-}
-
-impl GcCatalog {
-    pub fn open_existing_for_gc(path: &Path) -> Result<Self> {
-        let metadata = fs::symlink_metadata(path)
-            .wrap_err_with(|| format!("stat catalog database for garbage collection {:?}", path))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!(
-                "catalog database must be an existing regular file, not a symlink: {:?}",
-                path
-            );
-        }
-
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .wrap_err_with(|| {
-            format!("open existing catalog database for garbage collection {path:?}")
-        })?;
-        connection
-            .busy_timeout(Duration::from_secs(1))
-            .wrap_err("set garbage collection SQLite busy timeout")?;
-
-        let version: i64 = connection
-            .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
-            .wrap_err("read catalog schema version for garbage collection")?;
-        if version != CURRENT_SCHEMA_VERSION {
-            bail!(
-                "catalog schema version {version} is unsupported; expected {CURRENT_SCHEMA_VERSION}"
-            );
-        }
-
-        let journal_mode: String = connection
-            .query_row(READ_JOURNAL_MODE_SQL, [], |row| row.get(0))
-            .wrap_err("read catalog journal mode for garbage collection")?;
-        if !journal_mode.eq_ignore_ascii_case("wal") {
-            bail!(
-                "garbage collection requires an existing WAL-mode catalog; found journal_mode={journal_mode}"
-            );
-        }
-        connection
-            .execute_batch(GC_CONNECTION_PRAGMAS_SQL)
-            .wrap_err("enable garbage collection catalog PRAGMAs")?;
-        let confirmed_mode: String = connection
-            .query_row(CONFIRM_WAL_MODE_SQL, [], |row| row.get(0))
-            .wrap_err("confirm WAL journal mode for garbage collection")?;
-        if !confirmed_mode.eq_ignore_ascii_case("wal") {
-            bail!("catalog did not remain in WAL mode for garbage collection");
-        }
-
-        Ok(Self { connection })
-    }
-
-    pub fn begin_immediate(&mut self) -> Result<GcTransaction<'_>> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .wrap_err("begin immediate garbage collection transaction")?;
-        Ok(GcTransaction { transaction })
-    }
-}
-
-impl GcTransaction<'_> {
-    pub fn inspect_and_snapshot(&self) -> Result<CatalogAuditSnapshot> {
-        let version: i64 = self
-            .transaction
-            .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
-            .wrap_err("re-read catalog schema version inside garbage collection transaction")?;
-        if version != CURRENT_SCHEMA_VERSION {
-            bail!("catalog schema version changed to {version}; expected {CURRENT_SCHEMA_VERSION}");
-        }
-        inspect_catalog_connection(&self.transaction, GC_SNAPSHOT_SQL)
-    }
-
-    pub fn stage_mark(&self, blob: &CatalogBlob, marked_at_ms: i64) -> Result<()> {
-        let affected = self
-            .transaction
-            .execute(
-                GC_MARK_SQL,
-                params![
-                    blob.hash.as_str(),
-                    sqlite_u64(blob.size_bytes, "blob size")?,
-                    marked_at_ms
-                ],
-            )
-            .wrap_err_with(|| format!("mark unreachable blob {}", blob.hash))?;
-        require_one_gc_row("mark", blob, affected)
-    }
-
-    pub fn stage_resurrection(&self, blob: &CatalogBlob) -> Result<()> {
-        let affected = self
-            .transaction
-            .execute(
-                GC_RESURRECT_SQL,
-                params![
-                    blob.hash.as_str(),
-                    sqlite_u64(blob.size_bytes, "blob size")?
-                ],
-            )
-            .wrap_err_with(|| format!("resurrect referenced blob {}", blob.hash))?;
-        require_one_gc_row("resurrect", blob, affected)
-    }
-
-    pub fn stage_sweep(&self, blob: &CatalogBlob) -> Result<()> {
-        let affected = self
-            .transaction
-            .execute(
-                GC_SWEEP_SQL,
-                params![
-                    blob.hash.as_str(),
-                    sqlite_u64(blob.size_bytes, "blob size")?
-                ],
-            )
-            .wrap_err_with(|| format!("delete swept blob row {}", blob.hash))?;
-        require_one_gc_row("sweep", blob, affected)
-    }
-
-    pub fn commit(self) -> Result<()> {
-        self.transaction
-            .commit()
-            .wrap_err("commit garbage collection transaction")
-    }
-}
-
 fn require_one_gc_row(operation: &str, blob: &CatalogBlob, affected: usize) -> Result<()> {
     if affected != 1 {
         bail!(
@@ -932,96 +812,577 @@ pub enum SourceObservationOutcome {
     Updated,
 }
 
-pub struct Catalog {
-    connection: Connection,
+#[derive(Clone)]
+pub struct CatalogWriterConfig {
+    pub channel_capacity: NonZeroUsize,
+    pub max_batch_records: NonZeroUsize,
+    pub max_batch_latency: Duration,
+    pub checkpoint_every_batches: NonZeroUsize,
+    #[cfg(test)]
+    batch_deadline_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    batch_receipt_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl std::fmt::Debug for CatalogWriterConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CatalogWriterConfig")
+            .field("channel_capacity", &self.channel_capacity)
+            .field("max_batch_records", &self.max_batch_records)
+            .field("max_batch_latency", &self.max_batch_latency)
+            .field("checkpoint_every_batches", &self.checkpoint_every_batches)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for CatalogWriterConfig {
+    fn default() -> Self {
+        Self {
+            channel_capacity: NonZeroUsize::new(64).expect("non-zero"),
+            max_batch_records: NonZeroUsize::new(32).expect("non-zero"),
+            max_batch_latency: Duration::from_millis(25),
+            checkpoint_every_batches: NonZeroUsize::new(8).expect("non-zero"),
+            #[cfg(test)]
+            batch_deadline_hook: None,
+            #[cfg(test)]
+            batch_receipt_hook: None,
+        }
+    }
+}
+
+#[cfg(test)]
+impl CatalogWriterConfig {
+    fn with_batch_deadline_hook(mut self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.batch_deadline_hook = Some(hook);
+        self
+    }
+
+    fn with_batch_receipt_hook(mut self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.batch_receipt_hook = Some(hook);
+        self
+    }
+}
+
+pub struct CatalogWriterHandle {
+    request_tx: Sender<CatalogWriteRequest>,
+    join_handle: Option<thread::JoinHandle<Result<CatalogWriterReport>>>,
+    path: PathBuf,
+    command: &'static str,
+    events: Receiver<CatalogWriterEvent>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CatalogWriterReport {
+    pub committed_batches: u64,
+    pub committed_records: u64,
+    pub committed_gc_sessions: u64,
+    pub checkpoints: u64,
+}
+
+pub struct ImportWriteTicket {
+    response: Receiver<Result<ImportWriteOutcome>>,
+    path: PathBuf,
+    command: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ImportWriteOutcome {
+    Imported(BlobRecordOutcome, SourceObservationOutcome),
+    ObservedKnown,
+}
+
+/// Behavior-level writer telemetry without leaking database or channel internals.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CatalogWriterEvent {
+    Started,
+    Ready {
+        wal_autocheckpoint: i64,
+    },
+    Failed {
+        context: String,
+    },
+    Stopped,
+    BatchOpened {
+        size: usize,
+        commit_sequence: u64,
+    },
+    BatchCommitted {
+        size: usize,
+        commit_sequence: u64,
+        elapsed_ms: u128,
+    },
+    BatchRolledBack {
+        size: usize,
+        sequence: u64,
+    },
+    RecordCommitted {
+        sequence: u64,
+        outcome: ImportWriteOutcome,
+    },
+    CheckpointRequested {
+        commit_sequence: u64,
+        shutdown: bool,
+    },
+    CheckpointCompleted {
+        busy: i64,
+        log: i64,
+        checkpointed: i64,
+    },
+    GcBegun,
+    GcCommitted,
+    GcPartiallyCommitted,
+    GcRolledBack,
+    ShutdownFlush {
+        size: usize,
+    },
+}
+
+pub struct GcWriteSession<'a> {
+    writer: &'a CatalogWriterHandle,
+}
+
+enum CatalogWriteRequest {
+    Imported {
+        sequence: u64,
+        blob: BlobRecord,
+        observation: SourceObservation,
+        response: Sender<Result<ImportWriteOutcome>>,
+    },
+    Known {
+        sequence: u64,
+        observation: SourceObservation,
+        expected_blob_size_bytes: u64,
+        response: Sender<Result<ImportWriteOutcome>>,
+    },
+    GcBegin(Sender<Result<CatalogAuditSnapshot>>),
+    GcMark {
+        blob: CatalogBlob,
+        marked_at_ms: i64,
+        response: Sender<Result<()>>,
+    },
+    GcResurrect {
+        blob: CatalogBlob,
+        response: Sender<Result<()>>,
+    },
+    GcSweep {
+        blob: CatalogBlob,
+        response: Sender<Result<()>>,
+    },
+    GcFinish {
+        commit: bool,
+        partial: bool,
+        response: Sender<Result<()>>,
+    },
+}
+
+struct PendingImport {
+    sequence: u64,
+    request: PendingImportRequest,
+    response: Sender<Result<ImportWriteOutcome>>,
+}
+
+enum PendingImportRequest {
+    Imported(BlobRecord, SourceObservation),
+    Known(SourceObservation, u64),
+}
+
+impl CatalogWriterHandle {
+    pub fn spawn(path: PathBuf, config: CatalogWriterConfig) -> Result<Self> {
+        Self::spawn_inner(path, config, false)
+    }
+
+    pub fn spawn_existing_for_gc(path: PathBuf, config: CatalogWriterConfig) -> Result<Self> {
+        Self::spawn_inner(path, config, true)
+    }
+
+    fn spawn_inner(path: PathBuf, config: CatalogWriterConfig, gc_only: bool) -> Result<Self> {
+        let (request_tx, request_rx) = crossbeam_channel::bounded(config.channel_capacity.get());
+        let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
+        let (event_tx, events) = crossbeam_channel::bounded(EVENT_CHANNEL_CAPACITY);
+        let thread_path = path.clone();
+        let command = if gc_only { "gc" } else { "import" };
+        let join_handle = thread::Builder::new()
+            .name("catalog-writer".into())
+            .spawn(move || {
+                emit(&event_tx, CatalogWriterEvent::Started);
+                test_probe::pause_or_panic("catalog-writer-before-ready")?;
+                test_probe::pause_or_fail("catalog-writer-before-ready")?;
+                let startup = if gc_only {
+                    open_existing_gc_catalog(&thread_path)
+                } else {
+                    open_writable_catalog(&thread_path)
+                };
+                match startup {
+                    Ok(connection) => {
+                        let wal_autocheckpoint = writer_wal_autocheckpoint(&connection)?;
+                        let _ = ready_tx.send(Ok(()));
+                        emit(&event_tx, CatalogWriterEvent::Ready { wal_autocheckpoint });
+                        let result = writer_loop(connection, request_rx, config, &event_tx);
+                        match &result {
+                            Ok(_) => emit(&event_tx, CatalogWriterEvent::Stopped),
+                            Err(error) => emit(
+                                &event_tx,
+                                CatalogWriterEvent::Failed {
+                                    context: format!("{error:#}"),
+                                },
+                            ),
+                        }
+                        result
+                    }
+                    Err(error) => {
+                        // The joining handle retains the original report. The ready
+                        // channel is only a notification and must not stringify it.
+                        let _ = ready_tx.send(Err(()));
+                        emit(
+                            &event_tx,
+                            CatalogWriterEvent::Failed {
+                                context: format!("{error:#}"),
+                            },
+                        );
+                        Err(error)
+                    }
+                }
+            })
+            .wrap_err("spawn catalog writer thread")?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                request_tx,
+                join_handle: Some(join_handle),
+                path,
+                command,
+                events,
+            }),
+            Ok(Err(())) => {
+                match join_handle.join() {
+                    Ok(Err(startup_error)) => Err(startup_error
+                        .wrap_err(format!("start {command} catalog writer for {path:?}"))),
+                    Ok(Ok(_)) => Err(eyre!(
+                        "{command} catalog writer for {path:?} reported startup failure"
+                    )),
+                    Err(_) => Err(eyre!(
+                        "{command} catalog writer thread panicked during startup for {path:?}"
+                    )),
+                }
+            }
+            Err(ready_error) => match join_handle.join() {
+                Ok(Err(startup_error)) => Err(startup_error.wrap_err(format!(
+                    "{command} catalog writer for {path:?} closed its startup-ready channel: {ready_error}"
+                ))),
+                Ok(Ok(_)) => Err(eyre!(
+                    "{command} catalog writer for {path:?} closed its startup-ready channel before reporting readiness: {ready_error}"
+                )),
+                Err(_) => Err(eyre!(
+                    "{command} catalog writer thread panicked before startup readiness for {path:?}: {ready_error}"
+                )),
+            },
+        }
+    }
+
+    pub fn events(&self) -> Receiver<CatalogWriterEvent> {
+        self.events.clone()
+    }
+
+    pub fn record_imported_file(
+        &self,
+        sequence: u64,
+        blob: BlobRecord,
+        observation: SourceObservation,
+    ) -> Result<ImportWriteTicket> {
+        self.submit(|response| CatalogWriteRequest::Imported {
+            sequence,
+            blob,
+            observation,
+            response,
+        })
+    }
+
+    pub fn observe_unchanged_source(
+        &self,
+        sequence: u64,
+        observation: SourceObservation,
+        expected_blob_size_bytes: u64,
+    ) -> Result<ImportWriteTicket> {
+        self.submit(|response| CatalogWriteRequest::Known {
+            sequence,
+            observation,
+            expected_blob_size_bytes,
+            response,
+        })
+    }
+
+    fn submit(
+        &self,
+        build: impl FnOnce(Sender<Result<ImportWriteOutcome>>) -> CatalogWriteRequest,
+    ) -> Result<ImportWriteTicket> {
+        let (response_tx, response) = crossbeam_channel::bounded(1);
+        self.request_tx.send(build(response_tx)).wrap_err_with(|| {
+            format!(
+                "send {} request to catalog writer for {:?}",
+                self.command, self.path
+            )
+        })?;
+        Ok(ImportWriteTicket {
+            response,
+            path: self.path.clone(),
+            command: self.command,
+        })
+    }
+
+    pub fn begin_gc(&self) -> Result<(GcWriteSession<'_>, CatalogAuditSnapshot)> {
+        let (response_tx, response) = crossbeam_channel::bounded(1);
+        self.request_tx
+            .send(CatalogWriteRequest::GcBegin(response_tx))
+            .wrap_err_with(|| {
+                format!(
+                    "send GC begin request to catalog writer for {:?}",
+                    self.path
+                )
+            })?;
+        let snapshot = response.recv().wrap_err_with(|| {
+            format!(
+                "wait for GC begin response from catalog writer for {:?}",
+                self.path
+            )
+        })??;
+        Ok((GcWriteSession { writer: self }, snapshot))
+    }
+
+    pub fn finish(mut self) -> Result<CatalogWriterReport> {
+        let (replacement_tx, _) = crossbeam_channel::bounded(1);
+        let request_tx = std::mem::replace(&mut self.request_tx, replacement_tx);
+        drop(request_tx);
+        let join = self.join_handle.take().expect("writer join handle present");
+        join.join()
+            .map_err(|_| {
+                eyre!(
+                    "{} catalog writer thread panicked for {:?}",
+                    self.command,
+                    self.path
+                )
+            })?
+            .wrap_err_with(|| format!("finish {} catalog writer for {:?}", self.command, self.path))
+    }
+}
+
+impl Drop for CatalogWriterHandle {
+    fn drop(&mut self) {
+        // A JoinHandle detaches on drop. Commands call `finish` to propagate
+        // errors; this fallback still closes and joins the owned worker when a
+        // caller is unwinding so it cannot outlive the command or its lock.
+        if let Some(join) = self.join_handle.take() {
+            let (replacement_tx, _) = crossbeam_channel::bounded(1);
+            let request_tx = std::mem::replace(&mut self.request_tx, replacement_tx);
+            drop(request_tx);
+            if let Err(error) = join.join() {
+                tracing::error!(catalog = ?self.path, ?error, "catalog writer panicked while joining during cleanup");
+            }
+        }
+    }
+}
+
+impl ImportWriteTicket {
+    pub fn resolve(self) -> Result<ImportWriteOutcome> {
+        self.response.recv().wrap_err_with(|| {
+            format!(
+                "wait for {} catalog writer record outcome for {:?}",
+                self.command, self.path
+            )
+        })?
+    }
+}
+
+impl GcWriteSession<'_> {
+    pub fn stage_mark(&self, blob: &CatalogBlob, marked_at_ms: i64) -> Result<()> {
+        self.request(|response| CatalogWriteRequest::GcMark {
+            blob: blob.clone(),
+            marked_at_ms,
+            response,
+        })
+    }
+    pub fn stage_resurrection(&self, blob: &CatalogBlob) -> Result<()> {
+        self.request(|response| CatalogWriteRequest::GcResurrect {
+            blob: blob.clone(),
+            response,
+        })
+    }
+    pub fn stage_sweep(&self, blob: &CatalogBlob) -> Result<()> {
+        self.request(|response| CatalogWriteRequest::GcSweep {
+            blob: blob.clone(),
+            response,
+        })
+    }
+    pub fn commit(self) -> Result<()> {
+        self.commit_inner(false)
+    }
+    pub(crate) fn commit_partial(self) -> Result<()> {
+        self.commit_inner(true)
+    }
+    fn commit_inner(&self, partial: bool) -> Result<()> {
+        if let Err(commit_error) = self.finish(true, partial) {
+            // SQLite leaves a transaction active after many commit failures.
+            // Always drive the protocol to a terminal state before releasing
+            // the writer, retaining the commit error as the canonical cause.
+            return match self.finish(false, false) {
+                Ok(()) => {
+                    Err(commit_error.wrap_err("GC commit failed; rolled back active session"))
+                }
+                Err(rollback_error) => Err(commit_error.wrap_err(format!(
+                    "GC commit failed and rollback also failed: {rollback_error:#}"
+                ))),
+            };
+        }
+        Ok(())
+    }
+    pub fn rollback(self) -> Result<()> {
+        self.finish(false, false)
+    }
+    fn finish(&self, commit: bool, partial: bool) -> Result<()> {
+        self.request(|response| CatalogWriteRequest::GcFinish {
+            commit,
+            partial,
+            response,
+        })
+    }
+    fn request(&self, build: impl FnOnce(Sender<Result<()>>) -> CatalogWriteRequest) -> Result<()> {
+        let (response_tx, response) = crossbeam_channel::bounded(1);
+        self.writer
+            .request_tx
+            .send(build(response_tx))
+            .wrap_err_with(|| {
+                format!(
+                    "send GC request to catalog writer for {:?}",
+                    self.writer.path
+                )
+            })?;
+        response.recv().wrap_err_with(|| {
+            format!(
+                "wait for GC response from catalog writer for {:?}",
+                self.writer.path
+            )
+        })?
+    }
 }
 
 pub struct ReadOnlyCatalog {
     connection: SharedReadConnection,
 }
 
-impl Catalog {
-    pub fn open_or_initialize(path: &Path) -> Result<Self> {
-        let mut connection =
-            Connection::open(path).wrap_err_with(|| format!("open catalog database {:?}", path))?;
-        connection
-            .execute_batch(WRITABLE_PRAGMAS_SQL)
-            .wrap_err("enable catalog PRAGMAs")?;
-        migrate(&mut connection)?;
-        Ok(Self { connection })
-    }
+// Legacy fixture convenience for unit tests. Production code can only mutate
+// through `CatalogWriterHandle`.
+#[cfg(test)]
+pub(crate) struct Catalog {
+    writer: Option<CatalogWriterHandle>,
+    sequence: u64,
+}
 
-    pub fn record_imported_file(
+#[cfg(test)]
+impl Catalog {
+    pub(crate) fn open_or_initialize(path: &Path) -> Result<Self> {
+        Ok(Self {
+            writer: Some(CatalogWriterHandle::spawn(
+                path.to_path_buf(),
+                CatalogWriterConfig::default(),
+            )?),
+            sequence: 0,
+        })
+    }
+    pub(crate) fn record_imported_file(
         &mut self,
         blob: BlobRecord,
         observation: SourceObservation,
     ) -> Result<(BlobRecordOutcome, SourceObservationOutcome)> {
-        let tx = self
-            .connection
-            .transaction()
-            .wrap_err("begin catalog import transaction")?;
-
-        let inserted_blobs = tx
-            .execute(
-                INSERT_BLOB_SQL,
-                params![
-                    blob.hash.as_str(),
-                    sqlite_u64(blob.size_bytes, "blob size")?,
-                    blob.created_at_ms
-                ],
-            )
-            .wrap_err("upsert blob record")?;
-        let blob_outcome = if inserted_blobs == 1 {
-            BlobRecordOutcome::Inserted
-        } else {
-            BlobRecordOutcome::AlreadyPresent
-        };
-        let expected_size = sqlite_u64(blob.size_bytes, "blob size")?;
-        let existing_size: i64 = tx
-            .query_row(SELECT_BLOB_SIZE_SQL, params![blob.hash.as_str()], |row| {
-                row.get(0)
-            })
-            .wrap_err("read existing blob record")?;
-        if existing_size != expected_size {
-            bail!(
-                "catalog blob {} exists with size {}, imported size {}",
-                blob.hash,
-                existing_size,
-                blob.size_bytes
-            );
+        let outcome = self
+            .writer
+            .as_ref()
+            .expect("test catalog writer")
+            .record_imported_file(self.sequence, blob, observation)?
+            .resolve()?;
+        self.sequence += 1;
+        match outcome {
+            ImportWriteOutcome::Imported(blob, source) => Ok((blob, source)),
+            ImportWriteOutcome::ObservedKnown => unreachable!(),
         }
-        let resurrected = tx
-            .execute(
-                RESURRECT_IMPORTED_BLOB_SQL,
-                params![blob.hash.as_str(), expected_size],
-            )
-            .wrap_err("clear imported blob deletion mark")?;
-        if resurrected != 1 {
-            bail!(
-                "expected one matching blob row while resurrecting {}, updated {}",
-                blob.hash,
-                resurrected
-            );
+    }
+}
+
+#[cfg(test)]
+impl Drop for Catalog {
+    fn drop(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.finish();
         }
+    }
+}
 
-        let existing_source: Option<i64> = tx
-            .query_row(
-                SELECT_SOURCE_FILE_ID_SQL,
-                params![
-                    observation.source_root.as_str(),
-                    observation.relative_path.as_str()
-                ],
-                |row| row.get(0),
-            )
-            .optional()
-            .wrap_err("read existing source observation")?;
-        let source_outcome = if existing_source.is_some() {
-            SourceObservationOutcome::Updated
-        } else {
-            SourceObservationOutcome::Inserted
-        };
+fn record_imported_file_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    blob: BlobRecord,
+    observation: SourceObservation,
+) -> Result<(BlobRecordOutcome, SourceObservationOutcome)> {
+    validate_imported_record(&blob, &observation)?;
+    let inserted_blobs = tx
+        .execute(
+            INSERT_BLOB_SQL,
+            params![
+                blob.hash.as_str(),
+                sqlite_u64(blob.size_bytes, "blob size")?,
+                blob.created_at_ms
+            ],
+        )
+        .wrap_err("upsert blob record")?;
+    let blob_outcome = if inserted_blobs == 1 {
+        BlobRecordOutcome::Inserted
+    } else {
+        BlobRecordOutcome::AlreadyPresent
+    };
+    let expected_size = sqlite_u64(blob.size_bytes, "blob size")?;
+    let existing_size: i64 = tx
+        .query_row(SELECT_BLOB_SIZE_SQL, params![blob.hash.as_str()], |row| {
+            row.get(0)
+        })
+        .wrap_err("read existing blob record")?;
+    if existing_size != expected_size {
+        bail!(
+            "catalog blob {} exists with size {}, imported size {}",
+            blob.hash,
+            existing_size,
+            blob.size_bytes
+        );
+    }
+    let resurrected = tx
+        .execute(
+            RESURRECT_IMPORTED_BLOB_SQL,
+            params![blob.hash.as_str(), expected_size],
+        )
+        .wrap_err("clear imported blob deletion mark")?;
+    if resurrected != 1 {
+        bail!(
+            "expected one matching blob row while resurrecting {}, updated {}",
+            blob.hash,
+            resurrected
+        );
+    }
 
-        tx.execute(
+    let existing_source: Option<i64> = tx
+        .query_row(
+            SELECT_SOURCE_FILE_ID_SQL,
+            params![
+                observation.source_root.as_str(),
+                observation.relative_path.as_str()
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .wrap_err("read existing source observation")?;
+    let source_outcome = if existing_source.is_some() {
+        SourceObservationOutcome::Updated
+    } else {
+        SourceObservationOutcome::Inserted
+    };
+
+    let source_rows = tx
+        .execute(
             UPSERT_SOURCE_FILE_SQL,
             params![
                 observation.source_root.as_str(),
@@ -1033,69 +1394,96 @@ impl Catalog {
             ],
         )
         .wrap_err("upsert source observation")?;
-
-        tx.commit().wrap_err("commit catalog import transaction")?;
-        Ok((blob_outcome, source_outcome))
+    if source_rows != 1 {
+        bail!(
+            "imported source observation for {:?} expected one affected source row, affected {source_rows}",
+            observation.relative_path
+        );
     }
 
-    pub fn known_source_file(
-        &self,
-        source_root: &str,
-        relative_path: &SourceRelativePath,
-    ) -> Result<Option<KnownSourceFile>> {
-        known_source_file(&self.connection, source_root, relative_path)
-    }
+    Ok((blob_outcome, source_outcome))
+}
 
-    /// Record a repeat observation without changing its blob identity.
-    ///
-    /// Both updates are in one transaction so a deletion-marked blob is
-    /// resurrected exactly when its source observation is refreshed.
-    pub fn observe_known_source_file(
-        &mut self,
-        observation: SourceObservation,
-        expected_blob_size_bytes: u64,
-    ) -> Result<()> {
-        let tx = self
-            .connection
-            .transaction()
-            .wrap_err("begin known-source observation transaction")?;
-        let source_rows = tx
-            .execute(
-                OBSERVE_KNOWN_SOURCE_FILE_SQL,
-                params![
-                    observation.source_root.as_str(),
-                    observation.relative_path.as_str(),
-                    observation.blob_hash.as_str(),
-                    sqlite_u64(observation.size_bytes, "source file size")?,
-                    observation.modified_at_ms,
-                    observation.observed_at_ms,
-                ],
-            )
-            .wrap_err("refresh known source observation")?;
-        if source_rows != 1 {
-            bail!(
-                "known-source observation for {:?} expected one matching source row, affected {source_rows}",
-                observation.relative_path
-            );
-        }
-        let blob_rows = tx
-            .execute(
-                RESURRECT_KNOWN_SOURCE_BLOB_SQL,
-                params![
-                    observation.blob_hash.as_str(),
-                    sqlite_u64(expected_blob_size_bytes, "expected blob size")?,
-                ],
-            )
-            .wrap_err("resurrect known source blob")?;
-        if blob_rows != 1 {
-            bail!(
-                "known-source observation for blob {} expected one matching blob row, affected {blob_rows}",
-                observation.blob_hash
-            );
-        }
-        tx.commit()
-            .wrap_err("commit known-source observation transaction")
+/// Ensure the two halves of an imported record describe the same durable blob
+/// before this record can mutate its transaction.
+fn validate_imported_record(blob: &BlobRecord, observation: &SourceObservation) -> Result<()> {
+    if blob.hash != observation.blob_hash {
+        bail!(
+            "imported record for {:?} has blob hash {} but source observation references {}",
+            observation.relative_path,
+            blob.hash,
+            observation.blob_hash
+        );
     }
+    if blob.size_bytes != observation.size_bytes {
+        bail!(
+            "imported record for {:?} has blob size {} but source observation has size {}",
+            observation.relative_path,
+            blob.size_bytes,
+            observation.size_bytes
+        );
+    }
+    // Check conversion before any statement as well, so an out-of-range size
+    // cannot leave a partially-mutated transaction if this code changes later.
+    sqlite_u64(blob.size_bytes, "blob size")?;
+    sqlite_u64(observation.size_bytes, "source file size")?;
+    Ok(())
+}
+
+/// Record a repeat observation without changing its blob identity.
+///
+/// Both updates are in one transaction so a deletion-marked blob is
+/// resurrected exactly when its source observation is refreshed.
+fn observe_known_source_file_in_transaction(
+    tx: &rusqlite::Transaction<'_>,
+    observation: SourceObservation,
+    expected_blob_size_bytes: u64,
+) -> Result<()> {
+    if observation.size_bytes != expected_blob_size_bytes {
+        bail!(
+            "known-source observation for {:?} has source size {} but expected blob size {}",
+            observation.relative_path,
+            observation.size_bytes,
+            expected_blob_size_bytes
+        );
+    }
+    // Validate both values before issuing SQL. This preserves the atomic batch
+    // contract even if a catalog has independently inconsistent source/blob
+    // size fields from an older or externally-corrupted database.
+    let source_size = sqlite_u64(observation.size_bytes, "source file size")?;
+    let expected_blob_size = sqlite_u64(expected_blob_size_bytes, "expected blob size")?;
+    let source_rows = tx
+        .execute(
+            OBSERVE_KNOWN_SOURCE_FILE_SQL,
+            params![
+                observation.source_root.as_str(),
+                observation.relative_path.as_str(),
+                observation.blob_hash.as_str(),
+                source_size,
+                observation.modified_at_ms,
+                observation.observed_at_ms,
+            ],
+        )
+        .wrap_err("refresh known source observation")?;
+    if source_rows != 1 {
+        bail!(
+            "known-source observation for {:?} expected one matching source row, affected {source_rows}",
+            observation.relative_path
+        );
+    }
+    let blob_rows = tx
+        .execute(
+            RESURRECT_KNOWN_SOURCE_BLOB_SQL,
+            params![observation.blob_hash.as_str(), expected_blob_size,],
+        )
+        .wrap_err("resurrect known source blob")?;
+    if blob_rows != 1 {
+        bail!(
+            "known-source observation for blob {} expected one matching blob row, affected {blob_rows}",
+            observation.blob_hash
+        );
+    }
+    Ok(())
 }
 
 fn sqlite_u64(value: u64, label: &str) -> Result<i64> {
@@ -1277,4 +1665,801 @@ fn migrate(connection: &mut Connection) -> Result<()> {
         .wrap_err("create catalog schema version 1")?;
     tx.commit().wrap_err("commit catalog schema migration")?;
     Ok(())
+}
+
+fn open_writable_catalog(path: &Path) -> Result<Connection> {
+    let mut connection = Connection::open(path)
+        .wrap_err_with(|| format!("open catalog database in writer thread {path:?}"))?;
+    connection
+        .execute_batch(WRITABLE_PRAGMAS_SQL)
+        .wrap_err("enable catalog writer PRAGMAs")?;
+    migrate(&mut connection)?;
+    require_current_schema(&connection)?;
+    tracing::trace!(catalog = ?path, "catalog writer ready");
+    Ok(connection)
+}
+
+/// Verify the connection-local automatic-checkpoint policy on the actual
+/// connection that will enter the writer loop. Reopening the database would
+/// inspect a different connection and cannot establish this invariant.
+fn writer_wal_autocheckpoint(connection: &Connection) -> Result<i64> {
+    let value: i64 = connection
+        .query_row(READ_WAL_AUTOCHECKPOINT_SQL, [], |row| row.get(0))
+        .wrap_err("read catalog writer wal_autocheckpoint PRAGMA")?;
+    if value != 0 {
+        bail!("catalog writer wal_autocheckpoint must be 0 after writer PRAGMAs; found {value}");
+    }
+    Ok(value)
+}
+
+fn open_existing_gc_catalog(path: &Path) -> Result<Connection> {
+    let metadata = fs::symlink_metadata(path)
+        .wrap_err_with(|| format!("stat catalog database for garbage collection {path:?}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!("catalog database must be an existing regular file, not a symlink: {path:?}");
+    }
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .wrap_err_with(|| format!("open existing catalog database for garbage collection {path:?}"))?;
+    let version: i64 = connection
+        .query_row(READ_USER_VERSION_SQL, [], |row| row.get(0))
+        .wrap_err("read catalog schema version for garbage collection")?;
+    if version != CURRENT_SCHEMA_VERSION {
+        bail!("catalog schema version {version} is unsupported; expected {CURRENT_SCHEMA_VERSION}");
+    }
+    let journal_mode: String = connection
+        .query_row(READ_JOURNAL_MODE_SQL, [], |row| row.get(0))
+        .wrap_err("read catalog journal mode for garbage collection")?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        bail!(
+            "garbage collection requires an existing WAL-mode catalog; found journal_mode={journal_mode}"
+        );
+    }
+    connection
+        .busy_timeout(Duration::from_secs(1))
+        .wrap_err("set garbage collection SQLite busy timeout")?;
+    connection
+        .execute_batch(GC_CONNECTION_PRAGMAS_SQL)
+        .wrap_err("enable garbage collection catalog PRAGMAs")?;
+    connection
+        .execute_batch(WRITABLE_PRAGMAS_SQL)
+        .wrap_err("enable catalog writer PRAGMAs for garbage collection")?;
+    let confirmed_mode: String = connection
+        .query_row(CONFIRM_WAL_MODE_SQL, [], |row| row.get(0))
+        .wrap_err("confirm WAL journal mode for garbage collection")?;
+    if !confirmed_mode.eq_ignore_ascii_case("wal") {
+        bail!("catalog did not remain in WAL mode for garbage collection");
+    }
+    Ok(connection)
+}
+
+fn writer_loop(
+    mut connection: Connection,
+    request_rx: Receiver<CatalogWriteRequest>,
+    config: CatalogWriterConfig,
+    events: &Sender<CatalogWriterEvent>,
+) -> Result<CatalogWriterReport> {
+    let result = writer_loop_inner(&mut connection, &request_rx, config, events);
+    if result.is_err() {
+        // Do not leave producer tickets waiting for a receiver that has exited.
+        // The joined writer report remains the canonical failure with its source.
+        for request in request_rx.try_iter() {
+            reject_terminal_request(request);
+        }
+    }
+    result
+}
+
+fn writer_loop_inner(
+    connection: &mut Connection,
+    request_rx: &Receiver<CatalogWriteRequest>,
+    config: CatalogWriterConfig,
+    events: &Sender<CatalogWriterEvent>,
+) -> Result<CatalogWriterReport> {
+    let mut pending = Vec::new();
+    let mut first_pending_at: Option<Instant> = None;
+    let mut report = CatalogWriterReport::default();
+    let mut gc_active = false;
+    loop {
+        test_probe::pause_or_panic("catalog-writer-before-request")?;
+        test_probe::pause_or_fail("catalog-writer-before-request")?;
+        if let Some(first) = first_pending_at {
+            // Check the deadline before receiving again. `recv_timeout(Duration::ZERO)`
+            // may otherwise dequeue a request already queued after the deadline,
+            // incorrectly placing it in the expired batch.
+            #[cfg(test)]
+            if let Some(hook) = &config.batch_deadline_hook {
+                hook();
+            }
+            if first.elapsed() >= config.max_batch_latency {
+                flush_imports(connection, &mut pending, &mut report, &config, events)?;
+                first_pending_at = None;
+                continue;
+            }
+        }
+        let received = if let Some(first) = first_pending_at {
+            request_rx.recv_timeout(config.max_batch_latency.saturating_sub(first.elapsed()))
+        } else {
+            request_rx
+                .recv()
+                .map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected)
+        };
+        match received {
+            Ok(
+                request
+                @ (CatalogWriteRequest::Imported { .. } | CatalogWriteRequest::Known { .. }),
+            ) => {
+                // A request can be dequeued just as the deadline expires. Check
+                // again before assigning it to the open batch, so the deadline is
+                // absolute rather than merely the receive timeout's best effort.
+                #[cfg(test)]
+                if let Some(hook) = &config.batch_receipt_hook {
+                    hook();
+                }
+                if first_pending_at.is_some_and(|first| first.elapsed() >= config.max_batch_latency)
+                {
+                    flush_imports(connection, &mut pending, &mut report, &config, events)?;
+                    first_pending_at = None;
+                }
+                if gc_active {
+                    reject_import(
+                        request,
+                        "catalog writer rejects import records during an active GC session",
+                    );
+                    continue;
+                }
+                pending.push(pending_from(request));
+                // A private lifecycle seam for the CLI test that distinguishes
+                // an accepted request losing its response channel from a send
+                // attempted after the request receiver has already closed.
+                test_probe::pause_or_panic("catalog-writer-after-request-accepted")?;
+                test_probe::pause_or_fail("catalog-writer-after-request-accepted")?;
+                first_pending_at.get_or_insert_with(Instant::now);
+                if pending.len() >= config.max_batch_records.get() {
+                    flush_imports(connection, &mut pending, &mut report, &config, events)?;
+                    first_pending_at = None;
+                }
+            }
+            Ok(request) => {
+                if !pending.is_empty() {
+                    flush_imports(connection, &mut pending, &mut report, &config, events)?;
+                    first_pending_at = None;
+                }
+                match request {
+                    CatalogWriteRequest::GcBegin(response) => {
+                        let outcome = if gc_active {
+                            Err(eyre!("GC session already active"))
+                        } else {
+                            let result = (|| {
+                                connection
+                                    .execute_batch(GC_BEGIN_SQL)
+                                    .wrap_err("begin immediate garbage collection transaction")?;
+                                // Validate under the write reservation as well as at
+                                // startup: an external writer could otherwise change
+                                // user_version between open and the authoritative
+                                // reachability snapshot.
+                                require_current_schema(connection).wrap_err(
+                                    "validate catalog schema version inside GC transaction",
+                                )?;
+                                test_probe::pause_or_fail("catalog-gc-after-begin")?;
+                                let snapshot =
+                                    inspect_catalog_connection(connection, GC_SNAPSHOT_SQL)?;
+                                gc_active = true;
+                                emit(events, CatalogWriterEvent::GcBegun);
+                                tracing::trace!("catalog writer GC session begun");
+                                Ok(snapshot)
+                            })();
+                            if let Err(error) = result {
+                                // Inspection runs inside BEGIN IMMEDIATE. It must not
+                                // leave that transaction holding the writer connection
+                                // after a malformed catalog or probe failure.
+                                return_gc_begin_failure(connection, error)
+                            } else {
+                                result
+                            }
+                        };
+                        let _ = response.send(outcome);
+                    }
+                    CatalogWriteRequest::GcMark {
+                        blob,
+                        marked_at_ms,
+                        response,
+                    } => {
+                        let result = stage_gc_mark(connection, &blob, marked_at_ms, gc_active);
+                        let _ = response.send(result);
+                    }
+                    CatalogWriteRequest::GcResurrect { blob, response } => {
+                        let result = stage_gc_resurrect(connection, &blob, gc_active);
+                        let _ = response.send(result);
+                    }
+                    CatalogWriteRequest::GcSweep { blob, response } => {
+                        let result = stage_gc_sweep(connection, &blob, gc_active);
+                        let _ = response.send(result);
+                    }
+                    CatalogWriteRequest::GcFinish {
+                        commit,
+                        partial,
+                        response,
+                    } => {
+                        let result = if !gc_active {
+                            Err(eyre!("no active GC session"))
+                        } else if commit {
+                            connection
+                                .execute_batch(GC_COMMIT_SQL)
+                                .wrap_err("commit garbage collection transaction")
+                        } else {
+                            connection
+                                .execute_batch(GC_ROLLBACK_SQL)
+                                .wrap_err("rollback garbage collection transaction")
+                        };
+                        if result.is_ok() {
+                            gc_active = false;
+                            if commit {
+                                report.committed_gc_sessions = report
+                                    .committed_gc_sessions
+                                    .checked_add(1)
+                                    .ok_or_else(|| eyre!("catalog GC session counter overflow"))?;
+                                emit(
+                                    events,
+                                    if partial {
+                                        CatalogWriterEvent::GcPartiallyCommitted
+                                    } else {
+                                        CatalogWriterEvent::GcCommitted
+                                    },
+                                );
+                                if report
+                                    .committed_gc_sessions
+                                    .is_multiple_of(config.checkpoint_every_batches.get() as u64)
+                                {
+                                    emit(
+                                        events,
+                                        CatalogWriterEvent::CheckpointRequested {
+                                            commit_sequence: report.committed_batches,
+                                            shutdown: false,
+                                        },
+                                    );
+                                    checkpoint(connection, &mut report, events)?;
+                                }
+                            } else {
+                                emit(events, CatalogWriterEvent::GcRolledBack);
+                            }
+                        }
+                        let _ = response.send(result);
+                    }
+                    CatalogWriteRequest::Imported { .. } | CatalogWriteRequest::Known { .. } => {
+                        unreachable!()
+                    }
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                flush_imports(connection, &mut pending, &mut report, &config, events)?;
+                first_pending_at = None;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                if gc_active {
+                    let _ = connection.execute_batch(GC_ROLLBACK_SQL);
+                    bail!("catalog writer shut down with an active GC session");
+                }
+                if !pending.is_empty() {
+                    let size = pending.len();
+                    flush_imports(connection, &mut pending, &mut report, &config, events)?;
+                    // This terminal event means the durable flush succeeded.
+                    emit(events, CatalogWriterEvent::ShutdownFlush { size });
+                }
+                emit(
+                    events,
+                    CatalogWriterEvent::CheckpointRequested {
+                        commit_sequence: report.committed_batches,
+                        shutdown: true,
+                    },
+                );
+                checkpoint(connection, &mut report, events)?;
+                tracing::trace!(?report, "catalog writer stopped");
+                return Ok(report);
+            }
+        }
+    }
+}
+
+fn reject_terminal_request(request: CatalogWriteRequest) {
+    match request {
+        CatalogWriteRequest::Imported { response, .. }
+        | CatalogWriteRequest::Known { response, .. } => {
+            let _ = response.send(Err(eyre!(
+                "catalog writer terminated before completing request"
+            )));
+        }
+        CatalogWriteRequest::GcBegin(response) => {
+            let _ = response.send(Err(eyre!("catalog writer terminated before beginning GC")));
+        }
+        CatalogWriteRequest::GcMark { response, .. }
+        | CatalogWriteRequest::GcResurrect { response, .. }
+        | CatalogWriteRequest::GcSweep { response, .. }
+        | CatalogWriteRequest::GcFinish { response, .. } => {
+            let _ = response.send(Err(eyre!(
+                "catalog writer terminated before completing GC request"
+            )));
+        }
+    }
+}
+
+fn pending_from(request: CatalogWriteRequest) -> PendingImport {
+    match request {
+        CatalogWriteRequest::Imported {
+            sequence,
+            blob,
+            observation,
+            response,
+        } => PendingImport {
+            sequence,
+            request: PendingImportRequest::Imported(blob, observation),
+            response,
+        },
+        CatalogWriteRequest::Known {
+            sequence,
+            observation,
+            expected_blob_size_bytes,
+            response,
+        } => PendingImport {
+            sequence,
+            request: PendingImportRequest::Known(observation, expected_blob_size_bytes),
+            response,
+        },
+        _ => unreachable!(),
+    }
+}
+
+fn reject_import(request: CatalogWriteRequest, reason: &str) {
+    match request {
+        CatalogWriteRequest::Imported { response, .. }
+        | CatalogWriteRequest::Known { response, .. } => {
+            let _ = response.send(Err(eyre!(reason.to_owned())));
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn flush_imports(
+    connection: &mut Connection,
+    pending: &mut Vec<PendingImport>,
+    report: &mut CatalogWriterReport,
+    config: &CatalogWriterConfig,
+    events: &Sender<CatalogWriterEvent>,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let started = Instant::now();
+    let batch_size = pending.len();
+    let commit_sequence = report.committed_batches + 1;
+    emit(
+        events,
+        CatalogWriterEvent::BatchOpened {
+            size: batch_size,
+            commit_sequence,
+        },
+    );
+    let tx = match connection.transaction() {
+        Ok(tx) => tx,
+        Err(error) => {
+            emit(
+                events,
+                CatalogWriterEvent::BatchRolledBack {
+                    size: batch_size,
+                    sequence: pending[0].sequence,
+                },
+            );
+            return Err(eyre!(error).wrap_err("begin catalog import batch transaction"));
+        }
+    };
+    let mut outcomes = Vec::with_capacity(pending.len());
+    for item in pending.iter() {
+        let outcome = match &item.request {
+            PendingImportRequest::Imported(blob, observation) => {
+                record_imported_file_in_transaction(&tx, blob.clone(), observation.clone())
+                    .map(|(blob, source)| ImportWriteOutcome::Imported(blob, source))
+            }
+            PendingImportRequest::Known(observation, size) => {
+                observe_known_source_file_in_transaction(&tx, observation.clone(), *size)
+                    .map(|()| ImportWriteOutcome::ObservedKnown)
+            }
+        };
+        match outcome {
+            Ok(value) => outcomes.push(value),
+            Err(error) => {
+                let failed_sequence = item.sequence;
+                emit(
+                    events,
+                    CatalogWriterEvent::BatchRolledBack {
+                        size: batch_size,
+                        sequence: failed_sequence,
+                    },
+                );
+                for pending in pending.drain(..) {
+                    let _ = pending
+                        .response
+                        .send(Err(eyre!("catalog import batch rolled back")));
+                }
+                return Err(error.wrap_err(format!(
+                    "catalog import batch failed at sequence {}",
+                    failed_sequence
+                )));
+            }
+        }
+    }
+    if let Err(error) = tx.commit() {
+        emit(
+            events,
+            CatalogWriterEvent::BatchRolledBack {
+                size: batch_size,
+                sequence: pending[0].sequence,
+            },
+        );
+        for pending in pending.drain(..) {
+            let _ = pending
+                .response
+                .send(Err(eyre!("catalog import batch rolled back")));
+        }
+        return Err(eyre!(error).wrap_err("commit catalog import batch"));
+    }
+    report.committed_batches = report
+        .committed_batches
+        .checked_add(1)
+        .ok_or_else(|| eyre!("catalog batch counter overflow"))?;
+    report.committed_records = report
+        .committed_records
+        .checked_add(outcomes.len() as u64)
+        .ok_or_else(|| eyre!("catalog record counter overflow"))?;
+    for (item, outcome) in pending.drain(..).zip(outcomes) {
+        emit(
+            events,
+            CatalogWriterEvent::RecordCommitted {
+                sequence: item.sequence,
+                outcome: outcome.clone(),
+            },
+        );
+        let _ = item.response.send(Ok(outcome));
+    }
+    tracing::trace!(
+        batch_size,
+        batches = report.committed_batches,
+        elapsed_ms = started.elapsed().as_millis(),
+        "catalog writer batch committed"
+    );
+    emit(
+        events,
+        CatalogWriterEvent::BatchCommitted {
+            size: batch_size,
+            commit_sequence,
+            elapsed_ms: started.elapsed().as_millis(),
+        },
+    );
+    if report
+        .committed_batches
+        .is_multiple_of(config.checkpoint_every_batches.get() as u64)
+    {
+        emit(
+            events,
+            CatalogWriterEvent::CheckpointRequested {
+                commit_sequence,
+                shutdown: false,
+            },
+        );
+        checkpoint(connection, report, events)?;
+    }
+    Ok(())
+}
+
+fn checkpoint(
+    connection: &Connection,
+    report: &mut CatalogWriterReport,
+    events: &Sender<CatalogWriterEvent>,
+) -> Result<()> {
+    test_probe::pause_or_fail("catalog-writer-before-checkpoint")?;
+    // Exercise the same rusqlite error path as an operational checkpoint
+    // failure without exposing a production test switch. SQLite rejects this
+    // invalid checkpoint target before returning any checkpoint result row.
+    if test_probe::enabled("catalog-writer-checkpoint-sqlite-error")? {
+        connection
+            .execute_batch(TEST_INVALID_CHECKPOINT_SQL)
+            .wrap_err("run injected SQLite checkpoint error")?;
+    }
+    let (busy, log, checkpointed): (i64, i64, i64) = connection
+        .query_row(WAL_CHECKPOINT_PASSIVE_SQL, [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .wrap_err("run passive WAL checkpoint")?;
+    if busy < 0 || log < 0 || checkpointed < 0 {
+        bail!(
+            "invalid passive checkpoint result busy={busy} log={log} checkpointed={checkpointed}"
+        );
+    }
+    report.checkpoints = report
+        .checkpoints
+        .checked_add(1)
+        .ok_or_else(|| eyre!("catalog checkpoint counter overflow"))?;
+    tracing::trace!(
+        busy,
+        log,
+        checkpointed,
+        "catalog writer passive checkpoint complete"
+    );
+    emit(
+        events,
+        CatalogWriterEvent::CheckpointCompleted {
+            busy,
+            log,
+            checkpointed,
+        },
+    );
+    Ok(())
+}
+
+fn return_gc_begin_failure<T>(connection: &Connection, error: color_eyre::Report) -> Result<T> {
+    match connection
+        .execute_batch(GC_ROLLBACK_SQL)
+        .wrap_err("rollback garbage collection transaction after inspection failure")
+    {
+        Ok(()) => Err(error),
+        Err(cleanup_error) => Err(error.wrap_err(format!(
+            "GC inspection failed and rollback cleanup also failed: {cleanup_error:#}"
+        ))),
+    }
+}
+
+fn emit(events: &Sender<CatalogWriterEvent>, event: CatalogWriterEvent) {
+    if events.try_send(event).is_err() {
+        tracing::trace!("catalog writer telemetry receiver is saturated or closed");
+    }
+}
+
+fn stage_gc_mark(
+    connection: &Connection,
+    blob: &CatalogBlob,
+    marked_at_ms: i64,
+    active: bool,
+) -> Result<()> {
+    if !active {
+        bail!("no active GC session");
+    }
+    let affected = connection
+        .execute(
+            GC_MARK_SQL,
+            params![
+                blob.hash.as_str(),
+                sqlite_u64(blob.size_bytes, "blob size")?,
+                marked_at_ms
+            ],
+        )
+        .wrap_err_with(|| format!("mark unreachable blob {}", blob.hash))?;
+    require_one_gc_row("mark", blob, affected)
+}
+fn stage_gc_resurrect(connection: &Connection, blob: &CatalogBlob, active: bool) -> Result<()> {
+    if !active {
+        bail!("no active GC session");
+    }
+    let affected = connection
+        .execute(
+            GC_RESURRECT_SQL,
+            params![
+                blob.hash.as_str(),
+                sqlite_u64(blob.size_bytes, "blob size")?
+            ],
+        )
+        .wrap_err_with(|| format!("resurrect referenced blob {}", blob.hash))?;
+    require_one_gc_row("resurrect", blob, affected)
+}
+fn stage_gc_sweep(connection: &Connection, blob: &CatalogBlob, active: bool) -> Result<()> {
+    if !active {
+        bail!("no active GC session");
+    }
+    let affected = connection
+        .execute(
+            GC_SWEEP_SQL,
+            params![
+                blob.hash.as_str(),
+                sqlite_u64(blob.size_bytes, "blob size")?
+            ],
+        )
+        .wrap_err_with(|| format!("delete swept blob row {}", blob.hash))?;
+    require_one_gc_row("sweep", blob, affected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert_fs::TempDir;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    #[test]
+    fn elapsed_batch_deadline_flushes_before_a_queued_later_request() {
+        let temp = TempDir::new().expect("temporary catalog directory");
+        let (deadline_entered_tx, deadline_entered_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let pause_once = Arc::new(AtomicBool::new(true));
+        let hook = {
+            let pause_once = Arc::clone(&pause_once);
+            Arc::new(move || {
+                if pause_once.swap(false, Ordering::SeqCst) {
+                    deadline_entered_tx.send(()).expect("notify deadline entry");
+                    release_rx.recv().expect("release deadline check");
+                }
+            })
+        };
+
+        let path = temp.path().join("catalog.sqlite");
+        let writer = CatalogWriterHandle::spawn(
+            path,
+            CatalogWriterConfig {
+                channel_capacity: NonZeroUsize::new(4).expect("non-zero"),
+                max_batch_records: NonZeroUsize::new(4).expect("non-zero"),
+                max_batch_latency: Duration::from_millis(10),
+                checkpoint_every_batches: NonZeroUsize::new(8).expect("non-zero"),
+                batch_deadline_hook: None,
+                batch_receipt_hook: None,
+            }
+            .with_batch_deadline_hook(hook),
+        )
+        .expect("start writer");
+        let events = writer.events();
+        let first = writer
+            .record_imported_file(
+                0,
+                BlobRecord {
+                    hash: BlobHash::new("a".repeat(64)).expect("valid hash"),
+                    size_bytes: 1,
+                    created_at_ms: 1,
+                },
+                SourceObservation {
+                    source_root: "/source".into(),
+                    relative_path: SourceRelativePath::from_catalog_text("first.jpg")
+                        .expect("relative path"),
+                    blob_hash: BlobHash::new("a".repeat(64)).expect("valid hash"),
+                    size_bytes: 1,
+                    modified_at_ms: None,
+                    observed_at_ms: 1,
+                },
+            )
+            .expect("queue first record");
+        deadline_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writer reaches deadline check");
+        thread::sleep(Duration::from_millis(15));
+        let second = writer
+            .record_imported_file(
+                1,
+                BlobRecord {
+                    hash: BlobHash::new("b".repeat(64)).expect("valid hash"),
+                    size_bytes: 2,
+                    created_at_ms: 2,
+                },
+                SourceObservation {
+                    source_root: "/source".into(),
+                    relative_path: SourceRelativePath::from_catalog_text("second.jpg")
+                        .expect("relative path"),
+                    blob_hash: BlobHash::new("b".repeat(64)).expect("valid hash"),
+                    size_bytes: 2,
+                    modified_at_ms: None,
+                    observed_at_ms: 2,
+                },
+            )
+            .expect("queue request after deadline");
+        release_tx.send(()).expect("release writer");
+
+        first.resolve().expect("first batch commits");
+        let report = writer.finish().expect("finish writer");
+        second.resolve().expect("second batch commits");
+
+        assert_eq!((report.committed_batches, report.committed_records), (2, 2));
+        let batches: Vec<_> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                CatalogWriterEvent::BatchCommitted {
+                    size,
+                    commit_sequence,
+                    ..
+                } => Some((size, commit_sequence)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(batches, vec![(1, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn deadline_expiring_during_receipt_starts_a_new_batch() {
+        let temp = TempDir::new().expect("temporary catalog directory");
+        let (receipt_entered_tx, receipt_entered_rx) = crossbeam_channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+        let receipt_count = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let receipt_count = Arc::clone(&receipt_count);
+            Arc::new(move || {
+                if receipt_count.fetch_add(1, Ordering::SeqCst) == 1 {
+                    receipt_entered_tx.send(()).expect("notify second receipt");
+                    release_rx.recv().expect("release second receipt");
+                }
+            })
+        };
+
+        let writer = CatalogWriterHandle::spawn(
+            temp.path().join("catalog.sqlite"),
+            CatalogWriterConfig {
+                channel_capacity: NonZeroUsize::new(4).expect("non-zero"),
+                max_batch_records: NonZeroUsize::new(4).expect("non-zero"),
+                max_batch_latency: Duration::from_millis(10),
+                checkpoint_every_batches: NonZeroUsize::new(8).expect("non-zero"),
+                batch_deadline_hook: None,
+                batch_receipt_hook: None,
+            }
+            .with_batch_receipt_hook(hook),
+        )
+        .expect("start writer");
+        let events = writer.events();
+        let first = writer
+            .record_imported_file(
+                0,
+                BlobRecord {
+                    hash: BlobHash::new("a".repeat(64)).expect("valid hash"),
+                    size_bytes: 1,
+                    created_at_ms: 1,
+                },
+                SourceObservation {
+                    source_root: "/source".into(),
+                    relative_path: SourceRelativePath::from_catalog_text("first.jpg")
+                        .expect("relative path"),
+                    blob_hash: BlobHash::new("a".repeat(64)).expect("valid hash"),
+                    size_bytes: 1,
+                    modified_at_ms: None,
+                    observed_at_ms: 1,
+                },
+            )
+            .expect("queue first record");
+        let second = writer
+            .record_imported_file(
+                1,
+                BlobRecord {
+                    hash: BlobHash::new("b".repeat(64)).expect("valid hash"),
+                    size_bytes: 2,
+                    created_at_ms: 2,
+                },
+                SourceObservation {
+                    source_root: "/source".into(),
+                    relative_path: SourceRelativePath::from_catalog_text("second.jpg")
+                        .expect("relative path"),
+                    blob_hash: BlobHash::new("b".repeat(64)).expect("valid hash"),
+                    size_bytes: 2,
+                    modified_at_ms: None,
+                    observed_at_ms: 2,
+                },
+            )
+            .expect("queue second record");
+        receipt_entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writer dequeues second record");
+        thread::sleep(Duration::from_millis(15));
+        release_tx.send(()).expect("release writer");
+
+        first.resolve().expect("first batch commits");
+        let report = writer.finish().expect("finish writer");
+        second.resolve().expect("second batch commits");
+
+        assert_eq!((report.committed_batches, report.committed_records), (2, 2));
+        let batches: Vec<_> = events
+            .try_iter()
+            .filter_map(|event| match event {
+                CatalogWriterEvent::BatchCommitted {
+                    size,
+                    commit_sequence,
+                    ..
+                } => Some((size, commit_sequence)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(batches, vec![(1, 1), (1, 2)]);
+    }
 }

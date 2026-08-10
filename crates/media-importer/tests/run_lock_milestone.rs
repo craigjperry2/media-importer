@@ -612,6 +612,100 @@ fn cli_lock_acquisition_failure_exits_one_without_rendering_a_report() {
     );
 }
 
+#[test]
+fn catalog_writer_startup_failure_is_bounded_contextual_and_releases_store_lock() {
+    assert_writer_cli_failure(
+        "startup",
+        "catalog-writer-before-ready",
+        |_| {},
+        |probe| {
+            wait_probe(probe, "catalog-writer-before-ready");
+            inject_probe_marker(probe, "catalog-writer-before-ready", "fail");
+            release_probe(probe, "catalog-writer-before-ready");
+        },
+    );
+}
+
+#[test]
+fn catalog_writer_send_after_receiver_closed_is_bounded_contextual_and_releases_store_lock() {
+    assert_writer_cli_failure(
+        "send-after-receiver-closed",
+        "catalog-writer-after-request-accepted",
+        |fixture| {
+            fs::write(
+                fixture.source.join("z-second-photo.jpg"),
+                b"second test image",
+            )
+            .expect("second source file");
+        },
+        |probe| {
+            wait_probe(probe, "catalog-writer-after-request-accepted");
+            inject_probe_marker(probe, "catalog-writer-after-request-accepted", "fail");
+            release_probe(probe, "catalog-writer-after-request-accepted");
+        },
+    );
+}
+
+#[test]
+fn catalog_writer_accepted_request_response_closure_is_bounded_contextual_and_releases_store_lock()
+{
+    assert_writer_cli_failure(
+        "accepted-request-response-closure",
+        "catalog-writer-after-request-accepted",
+        |_| {},
+        |probe| {
+            wait_probe(probe, "catalog-writer-after-request-accepted");
+            inject_probe_marker(probe, "catalog-writer-after-request-accepted", "fail");
+            release_probe(probe, "catalog-writer-after-request-accepted");
+        },
+    );
+}
+
+#[test]
+fn catalog_writer_post_readiness_panic_is_joined_contextually_and_releases_store_lock() {
+    assert_writer_cli_failure(
+        "post-readiness-panic",
+        "catalog-writer-after-request-accepted",
+        |_| {},
+        |probe| {
+            wait_probe(probe, "catalog-writer-after-request-accepted");
+            inject_probe_marker(probe, "catalog-writer-after-request-accepted", "panic");
+            release_probe(probe, "catalog-writer-after-request-accepted");
+        },
+    );
+}
+
+#[test]
+fn sqlite_checkpoint_failure_is_contextual_and_releases_the_store_lock() {
+    let fixture = CommandFixture::new();
+    let probe = TempDir::new().expect("checkpoint probe directory");
+    let command = fixture.probed_command_with_output(
+        &[
+            "import",
+            "--store",
+            fixture.store_str(),
+            "--source",
+            fixture.source_str(),
+        ],
+        probe.path(),
+        "catalog-writer-checkpoint-sqlite-error",
+    );
+    let output = wait_failed_command_bounded(command, "SQLite checkpoint");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("checkpoint"),
+        "missing checkpoint context: {stderr}"
+    );
+    assert!(
+        stderr.contains("SQL logic error") || stderr.contains("syntax error"),
+        "missing SQLite cause: {stderr}"
+    );
+    let holder = fixture.lock_holder("checkpoint-released", LockMode::Exclusive);
+    fixture.wait_ready("checkpoint-released");
+    fixture.release("checkpoint-released");
+    wait_child(holder);
+}
+
 struct StoreFixture {
     temp: TempDir,
     store: PathBuf,
@@ -693,6 +787,18 @@ impl CommandFixture {
             )
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn probed CLI")
+    }
+    fn probed_command_with_output(&self, arguments: &[&str], probe: &Path, stages: &str) -> Child {
+        Command::new(env!("CARGO_BIN_EXE_media-importer"))
+            .args(arguments)
+            .env(
+                "MEDIA_IMPORTER_TEST_LIFECYCLE_PROBE",
+                format!("{}|{stages}", probe.display()),
+            )
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("spawn probed CLI")
     }
@@ -835,4 +941,69 @@ fn wait_command(mut child: Child) {
         child.wait().expect("wait for command").success(),
         "command failed"
     );
+}
+
+fn assert_writer_cli_failure(
+    name: &str,
+    stages: &str,
+    setup: impl FnOnce(&CommandFixture),
+    drive_failure: impl FnOnce(&Path),
+) {
+    let fixture = CommandFixture::new();
+    setup(&fixture);
+    let probe = TempDir::new().expect("writer lifecycle probe directory");
+    let command = fixture.probed_command_with_output(
+        &[
+            "import",
+            "--store",
+            fixture.store_str(),
+            "--source",
+            fixture.source_str(),
+        ],
+        probe.path(),
+        stages,
+    );
+    drive_failure(probe.path());
+    let output = wait_failed_command_bounded(command, name);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("catalog writer"),
+        "{name} omitted writer context: {stderr}"
+    );
+    assert!(
+        stderr.contains("catalog.sqlite") || stderr.contains("catalog"),
+        "{name} omitted catalog context: {stderr}"
+    );
+
+    let lock_name = format!("{name}-released");
+    let holder = fixture.lock_holder(&lock_name, LockMode::Exclusive);
+    fixture.wait_ready(&lock_name);
+    fixture.release(&lock_name);
+    wait_child(holder);
+}
+
+fn inject_probe_marker(probe: &Path, stage: &str, marker: &str) {
+    fs::write(probe.join(format!("{stage}.{marker}")), marker)
+        .expect("inject writer lifecycle failure");
+}
+
+fn wait_failed_command_bounded(mut child: Child, description: &str) -> std::process::Output {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if child.try_wait().expect("check failed command").is_some() {
+            let output = child
+                .wait_with_output()
+                .expect("collect failed command output");
+            assert!(
+                !output.status.success(),
+                "{description} writer failure unexpectedly succeeded"
+            );
+            return output;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{description} writer failure hung"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }

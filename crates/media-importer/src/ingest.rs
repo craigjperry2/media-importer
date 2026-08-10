@@ -1,8 +1,9 @@
 use color_eyre::Result;
+use color_eyre::eyre::eyre;
 
 use crate::catalog::{
-    BlobRecord, Catalog, Clock, KnownSourceFile, ReadOnlyCatalog, SourceObservation,
-    SourceObservationOutcome, SystemClock,
+    BlobRecord, CatalogWriterConfig, CatalogWriterHandle, Clock, ImportWriteOutcome,
+    KnownSourceFile, ReadOnlyCatalog, SourceObservation, SourceObservationOutcome, SystemClock,
 };
 use crate::config::ImportConfig;
 use crate::paths::BlobHash;
@@ -122,19 +123,61 @@ pub fn import_source_with_clock(config: ImportConfig, clock: &impl Clock) -> Res
 fn real_import(config: ImportConfig, clock: &impl Clock) -> Result<ImportReport> {
     let store = Store::new(config.store_root.clone());
     store.prepare_for_import()?;
-    let mut catalog = Catalog::open_or_initialize(&config.db_path)?;
+    // Metadata decisions are made from a read-only snapshot; all mutations are
+    // subsequently serialized by the command-scoped writer.
+    let read_only_catalog = ReadOnlyCatalog::open_if_exists(&config.db_path)?;
+    let writer_config = CatalogWriterConfig::default();
+    let max_outstanding_outcomes = writer_config.max_batch_records.get();
+    let writer = CatalogWriterHandle::spawn(config.db_path.clone(), writer_config)?;
+    let result = real_import_with_writer(
+        config,
+        clock,
+        &store,
+        read_only_catalog.as_ref(),
+        &writer,
+        max_outstanding_outcomes,
+    );
+    let finish = writer.finish();
+    match (result, finish) {
+        (Ok(report), Ok(_)) => Ok(report),
+        (Ok(_), Err(writer_error)) => Err(writer_error),
+        (Err(operation_error), Ok(_)) => Err(operation_error),
+        // The writer's first terminal failure is canonical. Preserve the
+        // producer-side failure as context instead of allowing it to mask the
+        // database failure that caused the writer to close its channel.
+        (Err(operation_error), Err(writer_error)) => Err(writer_error.wrap_err(format!(
+            "import operation also failed while catalog writer terminated: {operation_error:#}"
+        ))),
+    }
+}
+
+fn real_import_with_writer(
+    config: ImportConfig,
+    clock: &impl Clock,
+    store: &Store,
+    catalog: Option<&ReadOnlyCatalog>,
+    writer: &CatalogWriterHandle,
+    max_outstanding_outcomes: usize,
+) -> Result<ImportReport> {
     let source_root_text = config.source_root.durable_text()?;
     let candidates = scan_source(&config.source_root)?;
     let mut report = ImportReport {
         dry_run: false,
         ..ImportReport::default()
     };
+    let mut tickets = Vec::new();
+    let mut next_sequence = 0_u64;
 
     for candidate in candidates {
         report_observed_file(&mut report, &candidate);
-        let known = catalog.known_source_file(&source_root_text, &candidate.relative_path)?;
+        let known = match catalog {
+            Some(catalog) => {
+                catalog.known_source_file(&source_root_text, &candidate.relative_path)?
+            }
+            None => None,
+        };
         let disposition = validated_disposition(
-            &store,
+            store,
             classify_import(config.metadata_skip, &candidate, known.as_ref()),
         )?;
         tracing::trace!(path = ?candidate.relative_path, disposition = ?disposition, "import metadata decision");
@@ -146,10 +189,15 @@ fn real_import(config: ImportConfig, clock: &impl Clock) -> Result<ImportReport>
             } => {
                 tracing::trace!(path = ?candidate.relative_path, bytes = size_bytes, "skipping source content read");
                 let now_ms = clock.now_ms();
-                catalog.observe_known_source_file(
+                tickets.push(writer.observe_unchanged_source(
+                    next_sequence,
                     source_observation(&source_root_text, &candidate, blob_hash, now_ms),
                     size_bytes,
-                )?;
+                )?);
+                next_sequence = next_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| eyre!("catalog import sequence overflow"))?;
+                drain_outcomes_to_limit(&mut tickets, &mut report, max_outstanding_outcomes)?;
                 report.files_skipped += 1;
                 report.bytes_skipped += size_bytes;
                 report.blobs_reused += 1;
@@ -169,19 +217,45 @@ fn real_import(config: ImportConfig, clock: &impl Clock) -> Result<ImportReport>
                 report.bytes_hashed += blob.size_bytes;
                 report_store_outcome(&mut report, &blob.outcome, blob.size_bytes);
                 let now_ms = clock.now_ms();
-                let (_, source_outcome) = catalog.record_imported_file(
+                tickets.push(writer.record_imported_file(
+                    next_sequence,
                     BlobRecord {
                         hash: blob.hash.clone(),
                         size_bytes: blob.size_bytes,
                         created_at_ms: now_ms,
                     },
                     source_observation(&source_root_text, &candidate, blob.hash, now_ms),
-                )?;
-                report_source_outcome(&mut report, &source_outcome);
+                )?);
+                next_sequence = next_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| eyre!("catalog import sequence overflow"))?;
+                drain_outcomes_to_limit(&mut tickets, &mut report, max_outstanding_outcomes)?;
             }
         }
     }
+    for ticket in tickets {
+        apply_outcome(&mut report, ticket.resolve()?);
+    }
     Ok(report)
+}
+
+fn drain_outcomes_to_limit(
+    tickets: &mut Vec<crate::catalog::ImportWriteTicket>,
+    report: &mut ImportReport,
+    max_outstanding_outcomes: usize,
+) -> Result<()> {
+    while tickets.len() >= max_outstanding_outcomes {
+        let ticket = tickets.remove(0);
+        apply_outcome(report, ticket.resolve()?);
+    }
+    Ok(())
+}
+
+fn apply_outcome(report: &mut ImportReport, outcome: ImportWriteOutcome) {
+    match outcome {
+        ImportWriteOutcome::Imported(_, outcome) => report_source_outcome(report, &outcome),
+        ImportWriteOutcome::ObservedKnown => {}
+    }
 }
 
 fn dry_run_import(config: ImportConfig) -> Result<ImportReport> {
