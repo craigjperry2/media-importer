@@ -1,3 +1,5 @@
+> Implementation deferred, low priority
+
 # Rust Implementation Guide: Milestone 9
 
 This guide records implementation decisions for milestone 9. `SPEC.md` remains
