@@ -86,6 +86,22 @@ impl Store {
         expected_size: u64,
         chunk_size: NonZeroUsize,
     ) -> Result<StoredBlob> {
+        self.ingest_file_with_read_observer(source_path, expected_size, chunk_size, |_| {})
+    }
+
+    /// Import one file while reporting the completed source-read boundary.
+    ///
+    /// The callback runs immediately after the single source-to-staging pass,
+    /// before source stability validation or CAS installation.  This lets the
+    /// ingest executor report true source I/O even when a later operation
+    /// fails, without introducing a second source read.
+    pub(crate) fn ingest_file_with_read_observer(
+        &self,
+        source_path: &Path,
+        expected_size: u64,
+        chunk_size: NonZeroUsize,
+        on_read_complete: impl FnOnce(u64),
+    ) -> Result<StoredBlob> {
         let before = fs::metadata(source_path)
             .wrap_err_with(|| format!("stat source file before import {:?}", source_path))?;
         let before_mtime = before.modified().ok();
@@ -99,6 +115,10 @@ impl Store {
             .create_new(true)
             .open(&staging_path)
             .wrap_err_with(|| format!("create staging file {:?}", staging_path))?;
+        // From this point on every early return, including metadata checks and
+        // an existing-blob verification failure, removes the private staging
+        // path.  Successful installs remove it explicitly before returning.
+        let _staging_cleanup = StagingCleanup::new(&staging_path);
 
         let hash_result = match hash_reader_to_writer(&mut source, &mut staging, chunk_size) {
             Ok(result) => result,
@@ -109,6 +129,7 @@ impl Store {
             }
         };
         drop(staging);
+        on_read_complete(hash_result.size_bytes);
 
         if hash_result.size_bytes != expected_size {
             remove_staging_best_effort(&staging_path);
@@ -139,16 +160,27 @@ impl Store {
         }
 
         let final_path = self.root.blob_path(&hash_result.hash);
-        if let Some(parent) = final_path.parent() {
-            fs::create_dir_all(parent)
-                .wrap_err_with(|| format!("create blob parent directory {:?}", parent))?;
+        if let Some(parent) = final_path.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            remove_staging_best_effort(&staging_path);
+            return Err(error)
+                .wrap_err_with(|| format!("create blob parent directory {:?}", parent));
         }
 
+        // Private integration-test seam: a deterministic barrier immediately
+        // before the atomic no-replace install proves this is the dedup race
+        // boundary. It is inert unless the private probe environment is set.
+        crate::test_probe::pause_or_panic("store-before-cas-install")?;
+        crate::test_probe::pause_or_fail("store-before-cas-install")?;
         match fs::hard_link(&staging_path, &final_path) {
             Ok(()) => {
-                fs::remove_file(&staging_path).wrap_err_with(|| {
-                    format!("remove installed staging file {:?}", staging_path)
-                })?;
+                if let Err(error) = fs::remove_file(&staging_path) {
+                    remove_staging_best_effort(&staging_path);
+                    return Err(error).wrap_err_with(|| {
+                        format!("remove installed staging file {:?}", staging_path)
+                    });
+                }
                 set_readonly_blob(&final_path)
                     .wrap_err_with(|| format!("make blob read-only {:?}", final_path))?;
                 Ok(StoredBlob {
@@ -161,8 +193,12 @@ impl Store {
                 verify_existing_blob(&final_path, hash_result.size_bytes)?;
                 set_readonly_blob(&final_path)
                     .wrap_err_with(|| format!("make existing blob read-only {:?}", final_path))?;
-                fs::remove_file(&staging_path)
-                    .wrap_err_with(|| format!("remove reused staging file {:?}", staging_path))?;
+                if let Err(error) = fs::remove_file(&staging_path) {
+                    remove_staging_best_effort(&staging_path);
+                    return Err(error).wrap_err_with(|| {
+                        format!("remove reused staging file {:?}", staging_path)
+                    });
+                }
                 Ok(StoredBlob {
                     hash: hash_result.hash,
                     size_bytes: hash_result.size_bytes,
@@ -605,6 +641,26 @@ fn remove_staging_best_effort(path: &Path) {
     }
 }
 
+/// Owns best-effort cleanup for a staging path after it has been created.
+/// This deliberately remains armed after successful explicit removal: a
+/// second removal is harmless, while an unexpected error path cannot leak a
+/// temporary file into the next import run.
+struct StagingCleanup<'a> {
+    path: &'a Path,
+}
+
+impl<'a> StagingCleanup<'a> {
+    fn new(path: &'a Path) -> Self {
+        Self { path }
+    }
+}
+
+impl Drop for StagingCleanup<'_> {
+    fn drop(&mut self) {
+        remove_staging_best_effort(self.path);
+    }
+}
+
 #[cfg(unix)]
 fn set_readonly_blob(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -625,6 +681,7 @@ fn set_readonly_blob(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert_fs::TempDir;
 
     const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -663,6 +720,36 @@ mod tests {
         assert_eq!(
             classify_cas_entry(&mismatch, EntryKind::File, true),
             CasClassification::Invalid("shard-mismatch")
+        );
+    }
+
+    #[test]
+    fn reused_blob_verification_failure_removes_staging_file() {
+        let temp = TempDir::new().expect("temporary directory");
+        let store_path = temp.path().join("store");
+        fs::create_dir(&store_path).expect("store root");
+        let root = StoreRoot::validate(&store_path).expect("validated store root");
+        let store = Store::new(root.clone());
+        store.prepare_for_import().expect("prepared store");
+
+        let source = temp.path().join("source.bin");
+        fs::write(&source, b"expected source bytes").expect("source fixture");
+        let hash = BlobHash::new(blake3::hash(b"expected source bytes").to_hex().to_string())
+            .expect("source hash");
+        let final_path = root.blob_path(&hash);
+        fs::create_dir_all(final_path.parent().expect("blob parent")).expect("blob parent");
+        fs::write(&final_path, b"wrong size").expect("invalid existing blob");
+
+        let error = store
+            .ingest_file(&source, 21, NonZeroUsize::new(4).expect("chunk size"))
+            .expect_err("invalid existing blob must fail");
+        assert!(format!("{error:#}").contains("unexpected size"));
+        assert_eq!(
+            fs::read_dir(root.staging_dir())
+                .expect("read staging")
+                .count(),
+            0,
+            "verification failure must not leave staging artifacts"
         );
     }
 }

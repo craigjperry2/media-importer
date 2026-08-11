@@ -12,6 +12,8 @@ use crate::paths::{
 pub const DEFAULT_CHUNK_SIZE: NonZeroUsize =
     NonZeroUsize::new(1024 * 1024).expect("default chunk size is non-zero");
 pub const DEFAULT_HASH_DIGITS: NonZeroUsize = NonZeroUsize::new(6).expect("default is non-zero");
+pub const DEFAULT_WORKERS_PER_MOUNT: NonZeroUsize =
+    NonZeroUsize::new(1).expect("default worker count is non-zero");
 
 #[derive(Clone, Debug)]
 pub struct ImportConfig {
@@ -21,6 +23,7 @@ pub struct ImportConfig {
     pub dry_run: bool,
     pub metadata_skip: bool,
     pub chunk_size: NonZeroUsize,
+    pub workers_per_mount: NonZeroUsize,
 }
 
 #[derive(Clone, Debug)]
@@ -31,6 +34,7 @@ pub struct ImportOptions {
     pub dry_run: bool,
     pub metadata_skip: bool,
     pub chunk_size: NonZeroUsize,
+    pub workers_per_mount: NonZeroUsize,
 }
 
 #[derive(Clone, Debug)]
@@ -129,6 +133,7 @@ impl ImportConfig {
             dry_run: options.dry_run,
             metadata_skip: options.metadata_skip,
             chunk_size: options.chunk_size,
+            workers_per_mount: options.workers_per_mount,
         })
     }
 }

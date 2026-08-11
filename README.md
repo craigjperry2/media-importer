@@ -20,6 +20,7 @@ media-importer import \
   [--db DB_PATH] \
   [--dry-run] \
   [--chunk-size BYTES] \
+  [--workers-per-mount N] \
   [--no-metadata-skip]
 ```
 
@@ -60,6 +61,26 @@ the canonical source path, size, and available modified time match. This is an
 optimization that relies on the source filesystem faithfully updating modified
 times when content changes; use `--no-metadata-skip` to hash every regular
 source file when that assumption is unsuitable.
+
+`--workers-per-mount` defaults to `1`. It limits concurrent source-content
+reads separately for every source filesystem (`st_dev`), including nested
+mounts discovered beneath the source root. Increase it for SSD-backed sources;
+the importer intentionally does not guess disk type.
+
+Imports expose five bounded high-water measurements: 64 scanner-to-scheduler
+candidates; per-mount work, including both scheduler backlog and work admitted
+to the shared worker queue/active readers (at most 64 plus the smaller of that
+mount's configured reader limit and the eight-worker process cap); 16 completed
+blobs awaiting catalog submission (8 in the completion channel plus at most 8
+held by workers while that channel is full); 64 catalog-writer requests; and
+32 pending catalog outcomes. Queue occupancy events carry the stage, current
+occupancy, and capacity for deterministic test probes. The fixed pipeline
+capacities avoid configuration multiplication; the per-mount bound is computed
+with checked arithmetic from the validated non-zero reader limit.
+The scheduler skips mount groups at their configured reader limit and chooses
+the next eligible queued candidate, so excess mount identities cannot create
+threads or prevent an eligible mount from making progress. At most eight source
+worker threads are live for a run.
 
 ### Single-node command coordination
 

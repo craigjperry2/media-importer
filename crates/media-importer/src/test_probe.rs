@@ -4,6 +4,7 @@
 //! when its environment contains the test-specific probe specification.
 
 use std::fs;
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -34,6 +35,44 @@ pub(crate) fn pause(stage: &str) -> Result<()> {
     let directory = PathBuf::from(directory);
     let ready = directory.join(format!("{stage}.ready"));
     let release = directory.join(format!("{stage}.release"));
+    // A test may request a real multi-worker barrier by writing the number of
+    // participants before launching the command. This keeps the normal
+    // one-participant lifecycle handshakes unchanged while proving CAS races
+    // at the actual pre-install boundary.
+    let participants = directory.join(format!("{stage}.participants"));
+    let required = fs::read_to_string(&participants)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(1);
+    if required > 1 {
+        let current_thread = thread::current();
+        let name = current_thread.name().unwrap_or("unnamed");
+        let arrived = directory.join(format!("{stage}.arrived-{}-{name}", std::process::id()));
+        let _ = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(arrived);
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let count = fs::read_dir(&directory)
+                .wrap_err_with(|| format!("read lifecycle probe directory {directory:?}"))?
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!("{stage}.arrived-"))
+                })
+                .count();
+            if count >= required {
+                break;
+            }
+            if Instant::now() >= deadline {
+                bail!("timed out waiting for {required} lifecycle probe participants at {stage}");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
     fs::write(&ready, "ready").wrap_err_with(|| format!("write lifecycle probe {ready:?}"))?;
 
     let deadline = Instant::now() + WAIT;

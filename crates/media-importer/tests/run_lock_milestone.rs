@@ -652,7 +652,13 @@ fn catalog_writer_accepted_request_response_closure_is_bounded_contextual_and_re
     assert_writer_cli_failure(
         "accepted-request-response-closure",
         "catalog-writer-after-request-accepted",
-        |_| {},
+        |fixture| {
+            fs::write(
+                fixture.source.join("z-outstanding-photo.jpg"),
+                b"outstanding catalog request",
+            )
+            .expect("second source file");
+        },
         |probe| {
             wait_probe(probe, "catalog-writer-after-request-accepted");
             inject_probe_marker(probe, "catalog-writer-after-request-accepted", "fail");
@@ -663,16 +669,162 @@ fn catalog_writer_accepted_request_response_closure_is_bounded_contextual_and_re
 
 #[test]
 fn catalog_writer_post_readiness_panic_is_joined_contextually_and_releases_store_lock() {
-    assert_writer_cli_failure(
-        "post-readiness-panic",
+    let fixture = CommandFixture::new();
+    let probe = TempDir::new().expect("writer lifecycle probe directory");
+    let command = fixture.probed_command_with_output(
+        &[
+            "import",
+            "--store",
+            fixture.store_str(),
+            "--source",
+            fixture.source_str(),
+        ],
+        probe.path(),
         "catalog-writer-after-request-accepted",
-        |_| {},
-        |probe| {
-            wait_probe(probe, "catalog-writer-after-request-accepted");
-            inject_probe_marker(probe, "catalog-writer-after-request-accepted", "panic");
-            release_probe(probe, "catalog-writer-after-request-accepted");
-        },
     );
+    wait_probe(probe.path(), "catalog-writer-after-request-accepted");
+    inject_probe_marker(
+        probe.path(),
+        "catalog-writer-after-request-accepted",
+        "panic",
+    );
+    release_probe(probe.path(), "catalog-writer-after-request-accepted");
+    let output = wait_failed_command_bounded(command, "post-readiness-panic");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("catalog writer"),
+        "missing writer context: {stderr}"
+    );
+    assert!(
+        stderr.contains("injected lifecycle probe panic at catalog-writer-after-request-accepted"),
+        "writer panic payload was discarded: {stderr}"
+    );
+
+    let holder = fixture.lock_holder("post-readiness-panic-released", LockMode::Exclusive);
+    fixture.wait_ready("post-readiness-panic-released");
+    fixture.release("post-readiness-panic-released");
+    wait_child(holder);
+}
+
+#[test]
+fn source_worker_failure_cancels_joins_releases_lock_and_allows_clean_rerun() {
+    assert_source_worker_failure_recovers("source-worker-before-read", "fail");
+    assert_source_worker_failure_recovers("store-before-cas-install", "fail");
+}
+
+#[test]
+fn source_worker_panic_cancels_joins_releases_lock_and_allows_clean_rerun() {
+    assert_source_worker_failure_recovers("source-worker-before-read", "panic");
+    assert_source_worker_failure_recovers("store-before-cas-install", "panic");
+}
+
+#[test]
+fn sibling_source_worker_failures_hold_the_import_lock_after_failure_until_joined() {
+    assert_failed_siblings_hold_import_lock("fail");
+}
+
+#[test]
+fn sibling_source_worker_panics_hold_the_import_lock_after_failure_until_joined() {
+    assert_failed_siblings_hold_import_lock("panic");
+}
+
+fn assert_failed_siblings_hold_import_lock(marker: &str) {
+    let fixture = CommandFixture::new();
+    fs::write(
+        fixture.source.join("second-photo.jpg"),
+        b"second test image",
+    )
+    .expect("second source file");
+    let probe = TempDir::new().expect("sibling worker probe directory");
+    let stage = "source-worker-before-read";
+    fs::write(probe.path().join(format!("{stage}.participants")), "2")
+        .expect("configure sibling worker barrier");
+    let command = fixture.probed_command_with_output(
+        &[
+            "import",
+            "--store",
+            fixture.store_str(),
+            "--source",
+            fixture.source_str(),
+            "--workers-per-mount",
+            "2",
+        ],
+        probe.path(),
+        &format!("{stage},source-worker-after-failure"),
+    );
+    wait_for_probe_arrivals(probe.path(), stage, 2);
+
+    inject_probe_marker(probe.path(), stage, marker);
+    release_probe(probe.path(), stage);
+    wait_probe(probe.path(), "source-worker-after-failure");
+
+    // This probe fires only after a sibling has captured its injected failure
+    // or panic while it remains an active source reader. The contender must
+    // still be blocked until those siblings are released and joined.
+    let holder = assert_command_holds_exclusive_lock(&fixture, "siblings-failed-active");
+    release_probe(probe.path(), "source-worker-after-failure");
+    let output = wait_failed_command_bounded(command, "sibling source worker failure");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("source worker"),
+        "sibling worker failure omitted worker context"
+    );
+    fixture.wait_ready("siblings-failed-active");
+    fixture.release("siblings-failed-active");
+    wait_child(holder);
+}
+
+#[test]
+fn post_install_catalog_failure_is_adopted_by_a_clean_rerun() {
+    let fixture = CommandFixture::new();
+    let probe = TempDir::new().expect("post-install catalog probe directory");
+    let stage = "catalog-writer-after-request-accepted";
+    let command = fixture.probed_command_with_output(
+        &[
+            "import",
+            "--store",
+            fixture.store_str(),
+            "--source",
+            fixture.source_str(),
+        ],
+        probe.path(),
+        stage,
+    );
+    wait_probe(probe.path(), stage);
+    assert_eq!(
+        WalkDir::new(fixture.store.join("blobs"))
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+            .count(),
+        1,
+        "the CAS blob is installed before the catalog writer fails"
+    );
+    inject_probe_marker(probe.path(), stage, "fail");
+    release_probe(probe.path(), stage);
+    wait_failed_command_bounded(command, "post-install catalog failure");
+
+    wait_command(fixture.command(&[
+        "import",
+        "--store",
+        fixture.store_str(),
+        "--source",
+        fixture.source_str(),
+    ]));
+    let connection = Connection::open(fixture.store.join("catalog.sqlite")).expect("open catalog");
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM source_files", [], |row| row
+                .get::<_, i64>(0))
+            .expect("count adopted source rows"),
+        1,
+        "rerun adopts the pre-existing installed blob into the catalog"
+    );
+}
+
+#[test]
+fn scanner_failure_and_panic_cancel_release_lock_and_allow_clean_rerun() {
+    assert_scanner_failure_recovers("fail");
+    assert_scanner_failure_recovers("panic");
 }
 
 #[test]
@@ -905,6 +1057,29 @@ fn release(temp: &TempDir, name: &str) {
 fn wait_probe(probe: &Path, stage: &str) {
     wait_for(&probe.join(format!("{stage}.ready")), "lifecycle probe");
 }
+fn wait_for_probe_arrivals(probe: &Path, stage: &str, expected: usize) {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let arrived = fs::read_dir(probe)
+            .expect("read probe directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{stage}.arrived-"))
+            })
+            .count();
+        if arrived >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected} sibling workers at {stage}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
 fn release_probe(probe: &Path, stage: &str) {
     fs::write(probe.join(format!("{stage}.release")), "release").expect("release lifecycle probe");
 }
@@ -980,6 +1155,89 @@ fn assert_writer_cli_failure(
     fixture.wait_ready(&lock_name);
     fixture.release(&lock_name);
     wait_child(holder);
+}
+
+fn assert_source_worker_failure_recovers(stage: &str, marker: &str) {
+    let fixture = CommandFixture::new();
+    let probe = TempDir::new().expect("source worker probe directory");
+    let command = fixture.probed_command_with_output(
+        &[
+            "import",
+            "--store",
+            fixture.store_str(),
+            "--source",
+            fixture.source_str(),
+        ],
+        probe.path(),
+        stage,
+    );
+    wait_probe(probe.path(), stage);
+    inject_probe_marker(probe.path(), stage, marker);
+    release_probe(probe.path(), stage);
+    let output = wait_failed_command_bounded(command, "source worker failure");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(stage) || stderr.contains("source worker"),
+        "source worker failure omitted context: {stderr}"
+    );
+    assert_eq!(
+        fs::read_dir(fixture.store.join("staging"))
+            .expect("read failed-import staging directory")
+            .count(),
+        0,
+        "failed worker leaves no UUID staging artifact"
+    );
+
+    let holder = fixture.lock_holder("source-worker-released", LockMode::Exclusive);
+    fixture.wait_ready("source-worker-released");
+    fixture.release("source-worker-released");
+    wait_child(holder);
+    wait_command(fixture.command(&[
+        "import",
+        "--store",
+        fixture.store_str(),
+        "--source",
+        fixture.source_str(),
+    ]));
+}
+
+fn assert_scanner_failure_recovers(marker: &str) {
+    let fixture = CommandFixture::new();
+    let probe = TempDir::new().expect("scanner probe directory");
+    let command = fixture.probed_command_with_output(
+        &[
+            "import",
+            "--store",
+            fixture.store_str(),
+            "--source",
+            fixture.source_str(),
+        ],
+        probe.path(),
+        "scanner-before-next",
+    );
+    wait_probe(probe.path(), "scanner-before-next");
+    inject_probe_marker(probe.path(), "scanner-before-next", marker);
+    release_probe(probe.path(), "scanner-before-next");
+    let output = wait_failed_command_bounded(command, "scanner failure");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("scanner-before-next") || stderr.contains("coordinator"));
+    assert_eq!(
+        fs::read_dir(fixture.store.join("staging"))
+            .expect("staging")
+            .count(),
+        0
+    );
+    let holder = fixture.lock_holder("scanner-released", LockMode::Exclusive);
+    fixture.wait_ready("scanner-released");
+    fixture.release("scanner-released");
+    wait_child(holder);
+    wait_command(fixture.command(&[
+        "import",
+        "--store",
+        fixture.store_str(),
+        "--source",
+        fixture.source_str(),
+    ]));
 }
 
 fn inject_probe_marker(probe: &Path, stage: &str, marker: &str) {

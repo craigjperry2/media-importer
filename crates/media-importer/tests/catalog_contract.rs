@@ -537,7 +537,11 @@ fn failing_batch_rolls_back_every_record_after_earlier_batch_is_durable() {
         invalid.resolve().is_err(),
         "failing record must report failure"
     );
-    assert!(writer.finish().is_err(), "writer retains batch failure");
+    let error = writer.finish().expect_err("writer retains batch failure");
+    assert!(
+        format!("{error:#}").contains("durable.jpg"),
+        "batch failure identifies the actual failing source path: {error:#}"
+    );
 
     let connection = Connection::open(path).expect("reopen catalog");
     assert_eq!(

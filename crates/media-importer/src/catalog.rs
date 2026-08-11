@@ -721,12 +721,15 @@ fn require_one_gc_row(operation: &str, blob: &CatalogBlob, affected: usize) -> R
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::{BlobHash, Connection, Path, Result};
+    use color_eyre::eyre::WrapErr;
 
     const DELETE_SOURCES_SQL: &str = include_str!("catalog/sql/test_delete_sources.sql");
     const SET_MARK_SQL: &str = include_str!("catalog/sql/test_set_mark.sql");
     const READ_MARKS_SQL: &str = include_str!("catalog/sql/test_read_marks.sql");
     const BLOB_COUNT_SQL: &str = include_str!("catalog/sql/test_blob_count.sql");
     const READ_MARK_SQL: &str = include_str!("catalog/sql/test_read_mark.sql");
+    const SOURCE_BLOB_SNAPSHOT_SQL: &str =
+        include_str!("catalog/sql/test_source_blob_snapshot.sql");
 
     pub(crate) fn delete_sources(path: &Path, hash: Option<&BlobHash>) -> Result<()> {
         Connection::open(path)?.execute(
@@ -756,6 +759,22 @@ pub(crate) mod test_support {
 
     pub(crate) fn read_mark(path: &Path, hash: &BlobHash) -> Result<Option<i64>> {
         Ok(Connection::open(path)?.query_row(READ_MARK_SQL, [hash.as_str()], |row| row.get(0))?)
+    }
+
+    pub(crate) fn source_blob_snapshot(path: &Path) -> Result<(Vec<(String, String)>, i64)> {
+        let connection =
+            Connection::open(path).wrap_err_with(|| format!("open test catalog {path:?}"))?;
+        let rows = connection
+            .prepare(SOURCE_BLOB_SNAPSHOT_SQL)
+            .wrap_err("prepare test source snapshot")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .wrap_err("query test source snapshot")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .wrap_err("read test source snapshot")?;
+        let blob_count = connection
+            .query_row(BLOB_COUNT_SQL, [], |row| row.get(0))
+            .wrap_err("read test blob count")?;
+        Ok((rows, blob_count))
     }
 }
 
@@ -822,6 +841,8 @@ pub struct CatalogWriterConfig {
     batch_deadline_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     #[cfg(test)]
     batch_receipt_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    batch_terminal_hook: Option<std::sync::Arc<dyn Fn() -> Result<()> + Send + Sync>>,
 }
 
 impl std::fmt::Debug for CatalogWriterConfig {
@@ -847,19 +868,35 @@ impl Default for CatalogWriterConfig {
             batch_deadline_hook: None,
             #[cfg(test)]
             batch_receipt_hook: None,
+            #[cfg(test)]
+            batch_terminal_hook: None,
         }
     }
 }
 
 #[cfg(test)]
 impl CatalogWriterConfig {
-    fn with_batch_deadline_hook(mut self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) -> Self {
+    pub(crate) fn with_batch_deadline_hook(
+        mut self,
+        hook: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         self.batch_deadline_hook = Some(hook);
         self
     }
 
-    fn with_batch_receipt_hook(mut self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) -> Self {
+    pub(crate) fn with_batch_receipt_hook(
+        mut self,
+        hook: std::sync::Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         self.batch_receipt_hook = Some(hook);
+        self
+    }
+
+    pub(crate) fn with_batch_terminal_hook(
+        mut self,
+        hook: std::sync::Arc<dyn Fn() -> Result<()> + Send + Sync>,
+    ) -> Self {
+        self.batch_terminal_hook = Some(hook);
         self
     }
 }
@@ -870,6 +907,7 @@ pub struct CatalogWriterHandle {
     path: PathBuf,
     command: &'static str,
     events: Receiver<CatalogWriterEvent>,
+    terminal_failures: Receiver<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -881,10 +919,43 @@ pub struct CatalogWriterReport {
 }
 
 pub struct ImportWriteTicket {
-    response: Receiver<Result<ImportWriteOutcome>>,
+    response: Receiver<ImportWriteResponse>,
+    sequence: u64,
     path: PathBuf,
     command: &'static str,
 }
+
+type ImportWriteResponse = std::result::Result<ImportWriteOutcome, ImportWriteFailure>;
+
+/// The writer may roll back an entire batch. Keep the failing request's stable
+/// sequence on every peer response so ingest can attach the actual source path
+/// instead of blaming whichever ticket happened to be awaited first.
+#[derive(Debug)]
+pub struct ImportWriteFailure {
+    pub sequence: u64,
+    context: String,
+}
+
+impl ImportWriteFailure {
+    fn new(sequence: u64, context: impl Into<String>) -> Self {
+        Self {
+            sequence,
+            context: context.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ImportWriteFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "catalog request sequence {} failed: {}",
+            self.sequence, self.context
+        )
+    }
+}
+
+impl std::error::Error for ImportWriteFailure {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ImportWriteOutcome {
@@ -947,13 +1018,13 @@ enum CatalogWriteRequest {
         sequence: u64,
         blob: BlobRecord,
         observation: SourceObservation,
-        response: Sender<Result<ImportWriteOutcome>>,
+        response: Sender<ImportWriteResponse>,
     },
     Known {
         sequence: u64,
         observation: SourceObservation,
         expected_blob_size_bytes: u64,
-        response: Sender<Result<ImportWriteOutcome>>,
+        response: Sender<ImportWriteResponse>,
     },
     GcBegin(Sender<Result<CatalogAuditSnapshot>>),
     GcMark {
@@ -979,7 +1050,7 @@ enum CatalogWriteRequest {
 struct PendingImport {
     sequence: u64,
     request: PendingImportRequest,
-    response: Sender<Result<ImportWriteOutcome>>,
+    response: Sender<ImportWriteResponse>,
 }
 
 enum PendingImportRequest {
@@ -1000,6 +1071,10 @@ impl CatalogWriterHandle {
         let (request_tx, request_rx) = crossbeam_channel::bounded(config.channel_capacity.get());
         let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
         let (event_tx, events) = crossbeam_channel::bounded(EVENT_CHANNEL_CAPACITY);
+        // A writer has exactly one terminal result. Keep that notification
+        // separate from per-request responses so import can stop admitting
+        // source work as soon as the writer fails.
+        let (terminal_failure_tx, terminal_failures) = crossbeam_channel::bounded(1);
         let thread_path = path.clone();
         let command = if gc_only { "gc" } else { "import" };
         let join_handle = thread::Builder::new()
@@ -1013,12 +1088,24 @@ impl CatalogWriterHandle {
                 } else {
                     open_writable_catalog(&thread_path)
                 };
-                match startup {
+                let result = match startup {
                     Ok(connection) => {
                         let wal_autocheckpoint = writer_wal_autocheckpoint(&connection)?;
                         let _ = ready_tx.send(Ok(()));
                         emit(&event_tx, CatalogWriterEvent::Ready { wal_autocheckpoint });
-                        let result = writer_loop(connection, request_rx, config, &event_tx);
+                        // A post-ready panic must be reported through the same
+                        // terminal path as an ordinary writer error. Import may
+                        // be waiting for source-worker progress rather than a
+                        // particular request response when this happens.
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            writer_loop(connection, request_rx, config, &event_tx)
+                        }))
+                        .unwrap_or_else(|payload| {
+                            Err(eyre!(
+                                "catalog writer panicked after startup: {}",
+                                panic_payload_message(payload)
+                            ))
+                        });
                         match &result {
                             Ok(_) => emit(&event_tx, CatalogWriterEvent::Stopped),
                             Err(error) => emit(
@@ -1042,7 +1129,16 @@ impl CatalogWriterHandle {
                         );
                         Err(error)
                     }
+                };
+                if let Err(error) = &result {
+                    // This bounded channel has one producer and one terminal
+                    // message. `send` is intentional: a writer failure must
+                    // not be silently lost behind advisory telemetry.
+                    terminal_failure_tx
+                        .send(format!("{error:#}"))
+                        .map_err(|_| eyre!("catalog terminal failure receiver closed"))?;
                 }
+                result
             })
             .wrap_err("spawn catalog writer thread")?;
         match ready_rx.recv() {
@@ -1052,6 +1148,7 @@ impl CatalogWriterHandle {
                 path,
                 command,
                 events,
+                terminal_failures,
             }),
             Ok(Err(())) => {
                 match join_handle.join() {
@@ -1060,8 +1157,9 @@ impl CatalogWriterHandle {
                     Ok(Ok(_)) => Err(eyre!(
                         "{command} catalog writer for {path:?} reported startup failure"
                     )),
-                    Err(_) => Err(eyre!(
-                        "{command} catalog writer thread panicked during startup for {path:?}"
+                    Err(payload) => Err(eyre!(
+                        "{command} catalog writer thread panicked during startup for {path:?}: {}",
+                        panic_payload_message(payload)
                     )),
                 }
             }
@@ -1072,8 +1170,9 @@ impl CatalogWriterHandle {
                 Ok(Ok(_)) => Err(eyre!(
                     "{command} catalog writer for {path:?} closed its startup-ready channel before reporting readiness: {ready_error}"
                 )),
-                Err(_) => Err(eyre!(
-                    "{command} catalog writer thread panicked before startup readiness for {path:?}: {ready_error}"
+                Err(payload) => Err(eyre!(
+                    "{command} catalog writer thread panicked before startup readiness for {path:?}: {ready_error}: {}",
+                    panic_payload_message(payload)
                 )),
             },
         }
@@ -1083,13 +1182,40 @@ impl CatalogWriterHandle {
         self.events.clone()
     }
 
+    /// Return the writer's terminal failure without waiting for a particular
+    /// request ticket. This is an ingest-internal cancellation boundary.
+    pub(crate) fn try_terminal_failure(&self) -> Option<String> {
+        match self.terminal_failures.try_recv() {
+            Ok(failure) => Some(failure),
+            Err(crossbeam_channel::TryRecvError::Empty)
+            | Err(crossbeam_channel::TryRecvError::Disconnected) => None,
+        }
+    }
+
+    /// Clone the terminal notification receiver for a blocking ingest wait.
+    /// This remains crate-private so callers observe a catalog failure, rather
+    /// than depending on the writer's channel topology.
+    pub(crate) fn terminal_failure_receiver(&self) -> Receiver<String> {
+        self.terminal_failures.clone()
+    }
+
+    /// Snapshot the bounded request channel for executor telemetry.  This is
+    /// intentionally crate-private: callers receive only ingest-level queue
+    /// observations, never the writer's channel implementation.
+    pub(crate) fn request_queue_occupancy(&self) -> (usize, usize) {
+        (
+            self.request_tx.len(),
+            self.request_tx.capacity().unwrap_or(usize::MAX),
+        )
+    }
+
     pub fn record_imported_file(
         &self,
         sequence: u64,
         blob: BlobRecord,
         observation: SourceObservation,
     ) -> Result<ImportWriteTicket> {
-        self.submit(|response| CatalogWriteRequest::Imported {
+        self.submit(sequence, |response| CatalogWriteRequest::Imported {
             sequence,
             blob,
             observation,
@@ -1103,7 +1229,7 @@ impl CatalogWriterHandle {
         observation: SourceObservation,
         expected_blob_size_bytes: u64,
     ) -> Result<ImportWriteTicket> {
-        self.submit(|response| CatalogWriteRequest::Known {
+        self.submit(sequence, |response| CatalogWriteRequest::Known {
             sequence,
             observation,
             expected_blob_size_bytes,
@@ -1113,7 +1239,8 @@ impl CatalogWriterHandle {
 
     fn submit(
         &self,
-        build: impl FnOnce(Sender<Result<ImportWriteOutcome>>) -> CatalogWriteRequest,
+        sequence: u64,
+        build: impl FnOnce(Sender<ImportWriteResponse>) -> CatalogWriteRequest,
     ) -> Result<ImportWriteTicket> {
         let (response_tx, response) = crossbeam_channel::bounded(1);
         self.request_tx.send(build(response_tx)).wrap_err_with(|| {
@@ -1124,6 +1251,7 @@ impl CatalogWriterHandle {
         })?;
         Ok(ImportWriteTicket {
             response,
+            sequence,
             path: self.path.clone(),
             command: self.command,
         })
@@ -1154,14 +1282,25 @@ impl CatalogWriterHandle {
         drop(request_tx);
         let join = self.join_handle.take().expect("writer join handle present");
         join.join()
-            .map_err(|_| {
+            .map_err(|payload| {
                 eyre!(
-                    "{} catalog writer thread panicked for {:?}",
+                    "{} catalog writer thread panicked for {:?}: {}",
                     self.command,
-                    self.path
+                    self.path,
+                    panic_payload_message(payload)
                 )
             })?
             .wrap_err_with(|| format!("finish {} catalog writer for {:?}", self.command, self.path))
+    }
+}
+
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_owned()
     }
 }
 
@@ -1183,10 +1322,19 @@ impl Drop for CatalogWriterHandle {
 
 impl ImportWriteTicket {
     pub fn resolve(self) -> Result<ImportWriteOutcome> {
-        self.response.recv().wrap_err_with(|| {
-            format!(
-                "wait for {} catalog writer record outcome for {:?}",
-                self.command, self.path
+        self.resolve_detailed().map_err(|error| eyre!(error))
+    }
+
+    pub(crate) fn resolve_detailed(
+        self,
+    ) -> std::result::Result<ImportWriteOutcome, ImportWriteFailure> {
+        self.response.recv().map_err(|error| {
+            ImportWriteFailure::new(
+                self.sequence,
+                format!(
+                    "wait for {} catalog writer record outcome for {:?}: {error}",
+                    self.command, self.path
+                ),
             )
         })?
     }
@@ -1798,6 +1946,10 @@ fn writer_loop_inner(
                 if let Some(hook) = &config.batch_receipt_hook {
                     hook();
                 }
+                #[cfg(test)]
+                if let Some(hook) = &config.batch_terminal_hook {
+                    hook()?;
+                }
                 if first_pending_at.is_some_and(|first| first.elapsed() >= config.max_batch_latency)
                 {
                     flush_imports(connection, &mut pending, &mut report, &config, events)?;
@@ -1965,10 +2117,15 @@ fn writer_loop_inner(
 
 fn reject_terminal_request(request: CatalogWriteRequest) {
     match request {
-        CatalogWriteRequest::Imported { response, .. }
-        | CatalogWriteRequest::Known { response, .. } => {
-            let _ = response.send(Err(eyre!(
-                "catalog writer terminated before completing request"
+        CatalogWriteRequest::Imported {
+            sequence, response, ..
+        }
+        | CatalogWriteRequest::Known {
+            sequence, response, ..
+        } => {
+            let _ = response.send(Err(ImportWriteFailure::new(
+                sequence,
+                "catalog writer terminated before completing request",
             )));
         }
         CatalogWriteRequest::GcBegin(response) => {
@@ -2013,9 +2170,13 @@ fn pending_from(request: CatalogWriteRequest) -> PendingImport {
 
 fn reject_import(request: CatalogWriteRequest, reason: &str) {
     match request {
-        CatalogWriteRequest::Imported { response, .. }
-        | CatalogWriteRequest::Known { response, .. } => {
-            let _ = response.send(Err(eyre!(reason.to_owned())));
+        CatalogWriteRequest::Imported {
+            sequence, response, ..
+        }
+        | CatalogWriteRequest::Known {
+            sequence, response, ..
+        } => {
+            let _ = response.send(Err(ImportWriteFailure::new(sequence, reason)));
         }
         _ => unreachable!(),
     }
@@ -2070,6 +2231,7 @@ fn flush_imports(
             Ok(value) => outcomes.push(value),
             Err(error) => {
                 let failed_sequence = item.sequence;
+                let failed_source_path = pending_source_path(&item.request).clone();
                 emit(
                     events,
                     CatalogWriterEvent::BatchRolledBack {
@@ -2078,13 +2240,13 @@ fn flush_imports(
                     },
                 );
                 for pending in pending.drain(..) {
-                    let _ = pending
-                        .response
-                        .send(Err(eyre!("catalog import batch rolled back")));
+                    let _ = pending.response.send(Err(ImportWriteFailure::new(
+                        failed_sequence,
+                        "catalog import batch rolled back",
+                    )));
                 }
                 return Err(error.wrap_err(format!(
-                    "catalog import batch failed at sequence {}",
-                    failed_sequence
+                    "catalog import batch failed at sequence {failed_sequence} for source path {failed_source_path:?}"
                 )));
             }
         }
@@ -2097,10 +2259,12 @@ fn flush_imports(
                 sequence: pending[0].sequence,
             },
         );
+        let failed_sequence = pending[0].sequence;
         for pending in pending.drain(..) {
-            let _ = pending
-                .response
-                .send(Err(eyre!("catalog import batch rolled back")));
+            let _ = pending.response.send(Err(ImportWriteFailure::new(
+                failed_sequence,
+                "catalog import batch commit failed and was rolled back",
+            )));
         }
         return Err(eyre!(error).wrap_err("commit catalog import batch"));
     }
@@ -2150,6 +2314,13 @@ fn flush_imports(
         checkpoint(connection, report, events)?;
     }
     Ok(())
+}
+
+fn pending_source_path(request: &PendingImportRequest) -> &SourceRelativePath {
+    match request {
+        PendingImportRequest::Imported(_, observation)
+        | PendingImportRequest::Known(observation, _) => &observation.relative_path,
+    }
 }
 
 fn checkpoint(
@@ -2302,6 +2473,7 @@ mod tests {
                 checkpoint_every_batches: NonZeroUsize::new(8).expect("non-zero"),
                 batch_deadline_hook: None,
                 batch_receipt_hook: None,
+                batch_terminal_hook: None,
             }
             .with_batch_deadline_hook(hook),
         )
@@ -2395,6 +2567,7 @@ mod tests {
                 checkpoint_every_batches: NonZeroUsize::new(8).expect("non-zero"),
                 batch_deadline_hook: None,
                 batch_receipt_hook: None,
+                batch_terminal_hook: None,
             }
             .with_batch_receipt_hook(hook),
         )

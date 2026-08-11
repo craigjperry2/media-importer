@@ -2,6 +2,8 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -9,10 +11,29 @@ use assert_cmd::Command;
 use assert_fs::TempDir;
 use assert_fs::prelude::*;
 use media_importer::catalog::Clock;
-use media_importer::config::{DEFAULT_CHUNK_SIZE, ImportConfig, ImportOptions};
-use media_importer::ingest::import_source_with_clock;
+use media_importer::config::{
+    DEFAULT_CHUNK_SIZE, DEFAULT_WORKERS_PER_MOUNT, ImportConfig, ImportOptions,
+};
+use media_importer::ingest::{
+    IngestEvent, IngestObserver, import_source_with_clock, import_source_with_clock_and_observer,
+};
 use predicates::prelude::*;
 use rusqlite::{Connection, params};
+
+#[derive(Default)]
+struct RecordingIngestObserver(Mutex<Vec<IngestEvent>>);
+
+impl RecordingIngestObserver {
+    fn events(&self) -> Vec<IngestEvent> {
+        self.0.lock().expect("observer lock").clone()
+    }
+}
+
+impl IngestObserver for RecordingIngestObserver {
+    fn observe(&self, event: IngestEvent) {
+        self.0.lock().expect("observer lock").push(event);
+    }
+}
 
 #[test]
 fn help_exposes_import_command() {
@@ -23,6 +44,25 @@ fn help_exposes_import_command() {
         .success()
         .stdout(predicate::str::contains("import"))
         .stdout(predicate::str::contains("build-tree"));
+}
+
+#[test]
+fn import_exposes_and_validates_workers_per_mount() {
+    let mut help = Command::cargo_bin("media-importer").expect("binary exists");
+    help.arg("import")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--workers-per-mount"));
+
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    let store = temp.child("store");
+    run_import_args(source.path(), store.path(), &["--workers-per-mount", "0"])
+        .failure()
+        .stderr(predicate::str::contains("invalid value '0'"));
+    assert!(!store.path().exists());
 }
 
 #[test]
@@ -53,9 +93,9 @@ fn real_import_creates_cas_and_catalog_then_rerun_reuses_blobs() {
         .create_dir_all()
         .expect("staging dir");
     store
-        .child("staging/stale.tmp")
+        .child("staging/550e8400-e29b-41d4-a716-446655440000.tmp")
         .write_str("stale")
-        .expect("stale staging");
+        .expect("stale UUID staging artifact");
 
     run_import(source.path(), store.path())
         .success()
@@ -66,7 +106,13 @@ fn real_import_creates_cas_and_catalog_then_rerun_reuses_blobs() {
         .stdout(predicate::str::contains("Source records inserted: 3"))
         .stdout(predicate::str::contains("Bytes written: 10"));
 
-    assert!(!store.child("staging/stale.tmp").path().exists());
+    assert_eq!(
+        fs::read_dir(store.child("staging").path())
+            .expect("read import staging directory")
+            .count(),
+        0,
+        "import removes every stale staging entry, including UUID-named artifacts"
+    );
     assert_blob(store.path(), "same", true);
     assert_blob(store.path(), "hidden", true);
     assert_schema_version(&store.child("catalog.sqlite").path().to_path_buf(), 1);
@@ -88,6 +134,65 @@ fn real_import_creates_cas_and_catalog_then_rerun_reuses_blobs() {
 
     assert_source_row(store.path(), "a.txt", 2, "same");
     assert_catalog_counts(store.path(), 2, 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn preinstall_barrier_forces_same_content_cas_race_with_one_create_and_one_reuse() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("first")
+        .write_str("same")
+        .expect("first source");
+    source
+        .child("second")
+        .write_str("same")
+        .expect("second source");
+    let store = temp.child("store");
+    let probe = temp.child("probe");
+    probe.create_dir_all().expect("probe dir");
+    let stage = "store-before-cas-install";
+    probe
+        .child(format!("{stage}.participants"))
+        .write_str("2")
+        .expect("configure two-party pre-install barrier");
+
+    let child = ProcessCommand::new(assert_cmd::cargo::cargo_bin("media-importer"))
+        .arg("import")
+        .arg("--store")
+        .arg(store.path())
+        .arg("--source")
+        .arg(source.path())
+        .args(["--workers-per-mount", "2"])
+        .env(
+            "MEDIA_IMPORTER_TEST_LIFECYCLE_PROBE",
+            format!("{}|{stage}", probe.path().display()),
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn import");
+    wait_for_path(probe.child(format!("{stage}.ready")).path());
+    probe
+        .child(format!("{stage}.release"))
+        .write_str("release")
+        .expect("release pre-install barrier");
+    let output = child.wait_with_output().expect("wait import");
+    assert!(output.status.success(), "import failed: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Blobs created: 1"), "{stdout}");
+    assert!(stdout.contains("Blobs reused: 1"), "{stdout}");
+    assert_blob(store.path(), "same", true);
+    assert_catalog_counts(store.path(), 1, 2);
+    assert_eq!(
+        fs::read_dir(store.child("staging").path())
+            .expect("staging directory")
+            .count(),
+        0,
+        "both racing staging files are cleaned"
+    );
 }
 
 #[test]
@@ -119,6 +224,202 @@ fn unchanged_repeat_import_skips_source_reads_and_refreshes_observation() {
         before.0 < 9_999_999_999_999,
         "fixed clock must prove last_seen refresh"
     );
+}
+
+#[test]
+fn deep_real_import_api_accepts_an_observer_while_cli_convenience_stays_unchanged() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+    let store = temp.child("store");
+    let observer = Arc::new(RecordingIngestObserver::default());
+
+    let report = import_source_with_clock_and_observer(
+        import_config(source.path(), store.path()),
+        &FixedClock(123),
+        observer.clone(),
+    )
+    .expect("real import with observer");
+
+    assert_eq!(report.files_hashed, 1);
+    assert!(observer.events().iter().any(|event| matches!(
+        event,
+        IngestEvent::SourceReadCompleted { size_bytes: 5, .. }
+    )));
+    assert!(
+        observer
+            .events()
+            .iter()
+            .any(|event| matches!(event, IngestEvent::Shutdown))
+    );
+}
+
+#[test]
+fn repeat_real_import_observer_reports_metadata_skip_without_worker_lifecycle() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+    let store = temp.child("store");
+    import_source_with_clock(import_config(source.path(), store.path()), &FixedClock(100))
+        .expect("initial import");
+    let observer = Arc::new(RecordingIngestObserver::default());
+
+    let report = import_source_with_clock_and_observer(
+        import_config(source.path(), store.path()),
+        &FixedClock(200),
+        observer.clone(),
+    )
+    .expect("repeat import with observer");
+
+    assert_eq!(report.files_skipped, 1);
+    let events = observer.events();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        IngestEvent::MetadataSkipped {
+            sequence: 0,
+            size_bytes: 5,
+            ..
+        }
+    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, IngestEvent::Shutdown))
+    );
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        IngestEvent::WorkQueued { .. }
+            | IngestEvent::WorkDequeued { .. }
+            | IngestEvent::SourceReadStarted { .. }
+            | IngestEvent::SourceReadCompleted { .. }
+    )));
+}
+
+#[test]
+fn dry_run_observer_reports_read_lifecycle_without_creating_a_missing_store() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+    let store = temp.child("missing-store");
+    let observer = Arc::new(RecordingIngestObserver::default());
+
+    let report = import_source_with_clock_and_observer(
+        import_dry_run_config(source.path(), store.path()),
+        &FixedClock(123),
+        observer.clone(),
+    )
+    .expect("dry-run import with observer");
+
+    assert_eq!(report.files_hashed, 1);
+    assert!(!store.path().exists(), "dry run must not create the store");
+    let events = observer.events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, IngestEvent::CandidateDiscovered { sequence: 0, .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, IngestEvent::WorkQueued { sequence: 0, .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, IngestEvent::WorkDequeued { sequence: 0, .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, IngestEvent::SourceReadStarted { sequence: 0, .. }))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        IngestEvent::SourceReadCompleted {
+            sequence: 0,
+            size_bytes: 5,
+            ..
+        }
+    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, IngestEvent::Shutdown))
+    );
+}
+
+#[test]
+fn dry_run_observer_reports_metadata_skip_without_catalog_or_store_writes() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+    let store = temp.child("store");
+    run_import(source.path(), store.path()).success();
+    store
+        .child("staging/stale.tmp")
+        .write_str("stale")
+        .expect("write stale staging file");
+    let db = store.child("catalog.sqlite").path().to_path_buf();
+    let before = fs::metadata(&db).expect("catalog metadata").modified().ok();
+    let observer = Arc::new(RecordingIngestObserver::default());
+
+    let report = import_source_with_clock_and_observer(
+        import_dry_run_config(source.path(), store.path()),
+        &FixedClock(123),
+        observer.clone(),
+    )
+    .expect("dry-run metadata skip with observer");
+
+    assert_eq!(report.files_skipped, 1);
+    assert!(store.child("staging/stale.tmp").path().exists());
+    assert_eq!(
+        before,
+        fs::metadata(&db).expect("catalog metadata").modified().ok()
+    );
+    let events = observer.events();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, IngestEvent::CandidateDiscovered { sequence: 0, .. }))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        IngestEvent::MetadataSkipped {
+            sequence: 0,
+            size_bytes: 5,
+            ..
+        }
+    )));
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, IngestEvent::Shutdown))
+    );
+    assert!(events.iter().all(|event| !matches!(
+        event,
+        IngestEvent::WorkQueued { .. }
+            | IngestEvent::WorkDequeued { .. }
+            | IngestEvent::SourceReadStarted { .. }
+            | IngestEvent::SourceReadCompleted { .. }
+            | IngestEvent::CatalogSubmitted { .. }
+            | IngestEvent::CatalogCommitted { .. }
+    )));
 }
 
 #[test]
@@ -681,6 +982,17 @@ fn run_import(source: &Path, store: &Path) -> assert_cmd::assert::Assert {
     run_import_args(source, store, &[])
 }
 
+fn wait_for_path(path: &Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {path:?}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn run_import_args(source: &Path, store: &Path, extra: &[&str]) -> assert_cmd::assert::Assert {
     let mut cmd = Command::cargo_bin("media-importer").expect("binary exists");
     cmd.arg("import")
@@ -708,8 +1020,22 @@ fn import_config(source: &Path, store: &Path) -> ImportConfig {
         dry_run: false,
         metadata_skip: true,
         chunk_size: DEFAULT_CHUNK_SIZE,
+        workers_per_mount: DEFAULT_WORKERS_PER_MOUNT,
     })
     .expect("import config")
+}
+
+fn import_dry_run_config(source: &Path, store: &Path) -> ImportConfig {
+    ImportConfig::from_options(ImportOptions {
+        store: store.to_path_buf(),
+        source: source.to_path_buf(),
+        db: None,
+        dry_run: true,
+        metadata_skip: true,
+        chunk_size: DEFAULT_CHUNK_SIZE,
+        workers_per_mount: DEFAULT_WORKERS_PER_MOUNT,
+    })
+    .expect("dry-run import config")
 }
 
 fn source_observation_state(store: &Path, relative_path: &str) -> (i64, i64) {

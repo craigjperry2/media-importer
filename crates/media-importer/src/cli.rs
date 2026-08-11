@@ -7,7 +7,8 @@ use color_eyre::Result;
 use crate::audit::AuditReport;
 use crate::config::{
     AuditConfig, AuditOptions, BuildTreeConfig, BuildTreeOptions, DEFAULT_CHUNK_SIZE,
-    DEFAULT_HASH_DIGITS, GcConfig, GcOptions, ImportConfig, ImportOptions,
+    DEFAULT_HASH_DIGITS, DEFAULT_WORKERS_PER_MOUNT, GcConfig, GcOptions, ImportConfig,
+    ImportOptions,
 };
 use crate::gc::{GcAction, GcActionKind, GcReport, SweepSourceState};
 use crate::ingest::ImportReport;
@@ -72,6 +73,9 @@ struct ImportArgs {
     no_metadata_skip: bool,
     #[arg(long, default_value_t = DEFAULT_CHUNK_SIZE)]
     chunk_size: NonZeroUsize,
+    /// Maximum simultaneous source-content readers for each source filesystem.
+    #[arg(long, default_value_t = DEFAULT_WORKERS_PER_MOUNT)]
+    workers_per_mount: NonZeroUsize,
 }
 
 #[derive(Debug, Parser)]
@@ -114,6 +118,7 @@ impl TryFrom<Cli> for CliCommand {
                     dry_run: args.dry_run,
                     metadata_skip: !args.no_metadata_skip,
                     chunk_size: args.chunk_size,
+                    workers_per_mount: args.workers_per_mount,
                 })?;
                 Ok(Self::Import(config))
             }

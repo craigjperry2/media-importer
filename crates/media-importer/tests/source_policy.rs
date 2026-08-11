@@ -388,3 +388,23 @@ fn writable_catalog_pragmas_are_complete() {
         .collect();
     assert_no_violations(violations);
 }
+
+#[test]
+fn mount_identity_never_renders_the_raw_device_value() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/scanner.rs");
+    let source = read(&path);
+    assert_no_violations(
+        if source.contains("impl fmt::Display for MountId")
+            || source.contains("write!(formatter, \"mount-")
+        {
+            vec![Violation::new(
+                &path,
+                1,
+                "raw-mount-id-rendering",
+                "keep MountId opaque; do not render its platform device value",
+            )]
+        } else {
+            Vec::new()
+        },
+    );
+}
