@@ -196,6 +196,43 @@ reachability root. If an import was interrupted after installing a CAS blob but
 before catalog commit, rerunning that import can normally adopt the orphan;
 audit the store before retrying GC.
 
+## Output and telemetry
+
+All commands accept `--output auto|human|jsonl`. `auto` is the default: it
+prints the human report on a terminal and emits JSON Lines when stdout is
+captured or piped. `human` always selects the final human report; `jsonl`
+always selects machine-readable output.
+
+JSON Lines is a versioned public interface. Each line is one complete UTF-8
+object with `schema_version`, `command`, and `event`; for example:
+
+```json
+{"schema_version":1,"command":"import","event":"file_hashed","path":"album/image.jpg","size_bytes":1234,"dry_run":false}
+```
+
+Every completed command with a constructed report ends with
+`event: "command_summary"`, including audit/GC outcomes with findings and GC
+incomplete reports. An operational failure before a report exists may instead
+end with the safe `command_failed` event and an stderr error report. Version 1
+permits additive fields only; renaming, removing, or changing a field's
+meaning requires a new schema version.
+
+`path` values are escaped filesystem identities suitable for one-line output:
+source paths are source-relative, while build-tree paths identify the output
+path being planned or applied. `identity` carries the same safe escaped form
+for findings. `hash` is always the full lowercase BLAKE3 text. Count and byte
+fields are JSON integers, `dry_run` is a JSON boolean where the event can
+describe either mode, and `*_delta` events are additive counter increments.
+GC `gc_action` records are ordered by action kind (`mark`, `resurrect`, then
+`sweep`) and full hash; their additive `sweep_source_state` is `present`,
+`already_absent`, or `none` for a non-sweep action.
+The core events are `command_started`, `command_finished`, `command_summary`,
+`command_failed`, file/blob discovery and hash facts, CAS create/reuse facts,
+catalog commit/checkpoint facts, `finding`, GC preflight/action/commit facts,
+and build-tree plan/application facts. A renderer may coalesce high-frequency
+counter facts into their documented `*_delta` form; it never changes a
+blob-hash fact into an import-file fact.
+
 ## Setup
 
 Use the Nix development shell from the repository root:

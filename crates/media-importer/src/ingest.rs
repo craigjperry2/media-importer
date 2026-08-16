@@ -12,8 +12,8 @@ use color_eyre::eyre::{WrapErr, eyre};
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::catalog::{
-    BlobRecord, CatalogWriterConfig, CatalogWriterHandle, Clock, ImportWriteOutcome,
-    ImportWriteTicket, KnownSourceFile, ReadOnlyCatalog, SourceObservation,
+    BlobRecord, CatalogWriterConfig, CatalogWriterEvent, CatalogWriterHandle, Clock,
+    ImportWriteOutcome, ImportWriteTicket, KnownSourceFile, ReadOnlyCatalog, SourceObservation,
     SourceObservationOutcome, SystemClock,
 };
 use crate::config::ImportConfig;
@@ -21,6 +21,7 @@ use crate::paths::BlobHash;
 use crate::run_lock::{LockMode, StoreRunLock};
 use crate::scanner::{MountId, SourceFileCandidate, scan_source};
 use crate::store::{CasMetadataCheck, Store, StoreOutcome, StoredBlob};
+use crate::telemetry::{TelemetryEvent, TelemetrySink};
 
 const MAX_LIVE_SOURCE_WORKERS: usize = 8;
 const SCHEDULER_QUEUE_CAPACITY: usize = 64;
@@ -105,6 +106,12 @@ pub enum IngestEvent {
         mount_id: MountId,
         size_bytes: u64,
     },
+    SourceChunkStaged {
+        sequence: u64,
+        source_path: crate::paths::SourceRelativePath,
+        mount_id: MountId,
+        size_bytes: u64,
+    },
     WorkCancelled {
         sequence: u64,
         source_path: crate::paths::SourceRelativePath,
@@ -120,6 +127,7 @@ pub enum IngestEvent {
         sequence: u64,
         source_path: crate::paths::SourceRelativePath,
         outcome: StoreOutcome,
+        hash: BlobHash,
     },
     ActiveWorkers {
         mount_id: MountId,
@@ -141,6 +149,19 @@ pub enum IngestEvent {
     CatalogCommitted {
         sequence: u64,
         source_path: crate::paths::SourceRelativePath,
+    },
+    CatalogBatchCommitted {
+        size: usize,
+    },
+    CatalogCheckpointCompleted {
+        busy: i64,
+        log: i64,
+        checkpointed: i64,
+    },
+    /// Authoritative checkpoint total after the writer has joined, including
+    /// the mandatory shutdown checkpoint that cannot be drained in-band.
+    CatalogWriterFinished {
+        checkpoints: u64,
     },
     Cancellation,
     Shutdown,
@@ -215,6 +236,17 @@ impl fmt::Debug for IngestEvent {
                 .field("mount_id", mount_id)
                 .field("active", active)
                 .finish(),
+            Self::SourceChunkStaged {
+                sequence,
+                mount_id,
+                size_bytes,
+                ..
+            } => formatter
+                .debug_struct("SourceChunkStaged")
+                .field("sequence", sequence)
+                .field("mount_id", mount_id)
+                .field("size_bytes", size_bytes)
+                .finish_non_exhaustive(),
             Self::QueueOccupancy {
                 stage,
                 mount_id,
@@ -236,6 +268,24 @@ impl fmt::Debug for IngestEvent {
                 .debug_struct("CatalogCommitted")
                 .field("sequence", sequence)
                 .finish_non_exhaustive(),
+            Self::CatalogBatchCommitted { size } => formatter
+                .debug_struct("CatalogBatchCommitted")
+                .field("size", size)
+                .finish(),
+            Self::CatalogCheckpointCompleted {
+                busy,
+                log,
+                checkpointed,
+            } => formatter
+                .debug_struct("CatalogCheckpointCompleted")
+                .field("busy", busy)
+                .field("log", log)
+                .field("checkpointed", checkpointed)
+                .finish(),
+            Self::CatalogWriterFinished { checkpoints } => formatter
+                .debug_struct("CatalogWriterFinished")
+                .field("checkpoints", checkpoints)
+                .finish(),
             Self::Cancellation => formatter.write_str("Cancellation"),
             Self::Shutdown => formatter.write_str("Shutdown"),
         }
@@ -266,8 +316,25 @@ pub enum QueueStage {
     CatalogOutcomes,
 }
 
+impl QueueStage {
+    fn telemetry_name(self) -> &'static str {
+        match self {
+            Self::ScannerToScheduler => "scanner_to_scheduler",
+            Self::PerMountWork => "per_mount_work",
+            Self::CompletedBlobs => "completed_blobs",
+            Self::CatalogRequests => "catalog_requests",
+            Self::CatalogOutcomes => "catalog_outcomes",
+        }
+    }
+}
+
 pub trait IngestObserver: Send + Sync {
     fn observe(&self, event: IngestEvent);
+    /// Rendering failure is an operational cancellation request.  Keeping it
+    /// on the existing observer boundary avoids coupling workers to a renderer.
+    fn cancelled(&self) -> bool {
+        false
+    }
 }
 
 struct NoopObserver;
@@ -323,6 +390,161 @@ pub fn classify_import(
 
 pub fn import_source(config: ImportConfig) -> Result<ImportReport> {
     import_source_with_clock(config, &SystemClock)
+}
+
+/// CLI-facing import entry point which translates existing behavior facts into
+/// the command-neutral telemetry schema.
+pub fn import_source_with_telemetry(
+    config: ImportConfig,
+    telemetry: Arc<dyn TelemetrySink>,
+) -> Result<ImportReport> {
+    let dry_run = config.dry_run;
+    let observer = Arc::new(TelemetryObserver {
+        telemetry,
+        dry_run,
+        active_mounts: Mutex::new(HashMap::new()),
+    });
+    import_source_with_clock_and_observer(config, &SystemClock, observer)
+}
+
+struct TelemetryObserver {
+    telemetry: Arc<dyn TelemetrySink>,
+    dry_run: bool,
+    active_mounts: Mutex<HashMap<MountId, usize>>,
+}
+
+impl IngestObserver for TelemetryObserver {
+    fn observe(&self, event: IngestEvent) {
+        let telemetry = match event {
+            IngestEvent::CandidateDiscovered { source_path, .. } => {
+                TelemetryEvent::new("import", "file_discovered").field(
+                    "path",
+                    crate::integrity::escape_path(std::path::Path::new(source_path.as_str())),
+                )
+            }
+            IngestEvent::MetadataSkipped {
+                source_path,
+                size_bytes,
+                ..
+            } => TelemetryEvent::new("import", "file_skipped")
+                .field(
+                    "path",
+                    crate::integrity::escape_path(std::path::Path::new(source_path.as_str())),
+                )
+                .field("size_bytes", size_bytes)
+                .field("dry_run", self.dry_run),
+            IngestEvent::SourceReadCompleted {
+                source_path,
+                size_bytes,
+                ..
+            } => TelemetryEvent::new("import", "file_hashed")
+                .field(
+                    "path",
+                    crate::integrity::escape_path(std::path::Path::new(source_path.as_str())),
+                )
+                .field("size_bytes", size_bytes)
+                .field("dry_run", self.dry_run),
+            IngestEvent::SourceChunkStaged { size_bytes, .. } => {
+                self.telemetry.emit(
+                    TelemetryEvent::new("import", "source_bytes_delta")
+                        .field("bytes", size_bytes)
+                        .field("dry_run", self.dry_run),
+                );
+                // Dry-run hashes through the same observer seam but never
+                // creates staging; do not turn source reads into phantom
+                // staging writes in the public event stream.
+                if !self.dry_run {
+                    self.telemetry.emit(
+                        TelemetryEvent::new("import", "staging_bytes_delta")
+                            .field("bytes", size_bytes)
+                            .field("dry_run", false),
+                    );
+                }
+                return;
+            }
+            IngestEvent::CasStored {
+                source_path,
+                outcome,
+                hash,
+                ..
+            } => TelemetryEvent::new(
+                "import",
+                match outcome {
+                    StoreOutcome::Created => "cas_blob_created",
+                    StoreOutcome::Reused => "cas_blob_reused",
+                },
+            )
+            .field(
+                "path",
+                crate::integrity::escape_path(std::path::Path::new(source_path.as_str())),
+            )
+            .field("hash", hash.to_string())
+            .field("dry_run", self.dry_run),
+            IngestEvent::ActiveWorkers { mount_id, active } => {
+                let (active_workers, mounts) = match self.active_mounts.lock() {
+                    Ok(mut active_mounts) => {
+                        if active == 0 {
+                            active_mounts.remove(&mount_id);
+                        } else {
+                            active_mounts.insert(mount_id, active);
+                        }
+                        (
+                            active_mounts.values().copied().sum::<usize>() as u64,
+                            active_mounts.len() as u64,
+                        )
+                    }
+                    Err(_) => return,
+                };
+                TelemetryEvent::new("import", "active_content_workers")
+                    .field("active", active_workers)
+                    .field("mounts", mounts)
+            }
+            IngestEvent::QueueOccupancy {
+                stage,
+                occupancy,
+                capacity,
+                ..
+            } => TelemetryEvent::new("import", "queue_occupancy")
+                .field("stage", stage.telemetry_name())
+                .field("occupancy", occupancy as u64)
+                .field("capacity", capacity as u64),
+            IngestEvent::QueueBackpressure => TelemetryEvent::new("import", "queue_backpressure"),
+            IngestEvent::CatalogCommitted { .. } => {
+                TelemetryEvent::new("import", "catalog_record_committed")
+            }
+            IngestEvent::CatalogBatchCommitted { size } => {
+                TelemetryEvent::new("import", "catalog_batch_committed")
+                    .field("records", size as u64)
+            }
+            IngestEvent::CatalogCheckpointCompleted {
+                busy,
+                log,
+                checkpointed,
+            } => TelemetryEvent::new("import", "catalog_checkpoint_completed")
+                .field("busy", busy as u64)
+                .field("log", log as u64)
+                .field("checkpointed", checkpointed as u64),
+            IngestEvent::CatalogWriterFinished { checkpoints } => {
+                TelemetryEvent::new("import", "catalog_final_checkpoint")
+                    .field("checkpoints", checkpoints)
+            }
+            IngestEvent::Cancellation => TelemetryEvent::new("import", "cancelled"),
+            // Operational details stay in stderr's contextual color-eyre
+            // report. They can contain arbitrary OS error text and are not a
+            // stable or safe public JSON field.
+            IngestEvent::WorkFailed { sequence, .. } => {
+                TelemetryEvent::new("import", "operational_failure")
+                    .field("sequence", sequence)
+                    .field("context", "source_worker_failed")
+            }
+            _ => return,
+        };
+        self.telemetry.emit(telemetry);
+    }
+
+    fn cancelled(&self) -> bool {
+        self.telemetry.failed()
+    }
 }
 
 pub fn import_source_with_clock(config: ImportConfig, clock: &impl Clock) -> Result<ImportReport> {
@@ -392,6 +614,11 @@ fn real_import(
         ))
     });
     let finish = writer.finish();
+    if let Ok(writer_report) = &finish {
+        observer.observe(IngestEvent::CatalogWriterFinished {
+            checkpoints: writer_report.checkpoints,
+        });
+    }
     match (result, finish) {
         (Ok(report), Ok(_)) => Ok(report),
         (Ok(_), Err(error)) => Err(error),
@@ -457,6 +684,11 @@ fn execute_import(
     // staging file or CAS mutation.
     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         loop {
+            drain_catalog_events(writer, observer.as_ref());
+            if observer.cancelled() {
+                workers.cancel();
+                return Err(eyre!("telemetry renderer failed"));
+            }
             poll_terminal_failures(&workers, writer)?;
             dispatch_ready(
                 &mut pending,
@@ -587,6 +819,7 @@ fn execute_import(
             )?;
         }
         while let Some((sequence, ticket)) = tickets.pop_first() {
+            drain_catalog_events(writer, observer.as_ref());
             let source_path = ticket.source_path.clone();
             let outcome = resolve_ticket(ticket, &tickets)?;
             observer.observe(IngestEvent::CatalogCommitted {
@@ -595,6 +828,7 @@ fn execute_import(
             });
             apply_outcome(&mut report, outcome);
         }
+        drain_catalog_events(writer, observer.as_ref());
         Ok(report)
     }))
     .unwrap_or_else(|payload| {
@@ -623,6 +857,29 @@ fn execute_import(
         (Ok(_), Err(error)) => Err(error),
         (Err(error), Err(join)) => {
             Err(error.wrap_err(format!("source worker shutdown also failed: {join:#}")))
+        }
+    }
+}
+
+/// Bridge catalog-owned durable outcomes into the command-neutral ingest
+/// domain. The writer never knows about presentation and the renderer never
+/// reaches into SQLite/channel implementation details.
+fn drain_catalog_events(writer: &CatalogWriterHandle, observer: &dyn IngestObserver) {
+    for event in writer.events().try_iter() {
+        match event {
+            CatalogWriterEvent::BatchCommitted { size, .. } => {
+                observer.observe(IngestEvent::CatalogBatchCommitted { size });
+            }
+            CatalogWriterEvent::CheckpointCompleted {
+                busy,
+                log,
+                checkpointed,
+            } => observer.observe(IngestEvent::CatalogCheckpointCompleted {
+                busy,
+                log,
+                checkpointed,
+            }),
+            _ => {}
         }
     }
 }
@@ -815,6 +1072,7 @@ fn complete_work(
         sequence: completed.work.sequence,
         source_path: completed.work.candidate.relative_path.clone(),
         outcome: blob.outcome.clone(),
+        hash: blob.hash.clone(),
     });
     report.files_hashed += 1;
     report.bytes_hashed += blob.size_bytes;
@@ -933,7 +1191,8 @@ impl SourceWorkers {
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let store = Store::new(root);
                         while let Ok(work) = worker_jobs_rx.recv() {
-                            if cancelled.load(Ordering::Acquire) {
+                            if cancelled.load(Ordering::Acquire) || observer.cancelled() {
+                                cancelled.store(true, Ordering::Release);
                                 observer.observe(IngestEvent::WorkCancelled {
                                     sequence: work.sequence,
                                     source_path: work.candidate.relative_path,
@@ -956,6 +1215,7 @@ impl SourceWorkers {
                             });
                             let sequence = work.sequence;
                             let source_path = work.candidate.relative_path.clone();
+                            let mut staged_bytes = 0_u64;
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     crate::test_probe::pause_or_panic("source-worker-before-read")?;
@@ -965,12 +1225,21 @@ impl SourceWorkers {
                                         work.candidate.size_bytes,
                                         chunk_size,
                                         |size_bytes| {
-                                            observer.observe(IngestEvent::SourceReadCompleted {
+                                            staged_bytes = staged_bytes
+                                                .checked_add(size_bytes)
+                                                .ok_or_else(|| {
+                                                    eyre!("source staging byte counter overflow")
+                                                })?;
+                                            observer.observe(IngestEvent::SourceChunkStaged {
                                                 sequence,
-                                                source_path,
+                                                source_path: source_path.clone(),
                                                 mount_id,
                                                 size_bytes,
                                             });
+                                            if observer.cancelled() {
+                                                return Err(eyre!("telemetry renderer failed"));
+                                            }
+                                            Ok(())
                                         },
                                     )
                                 }))
@@ -981,6 +1250,18 @@ impl SourceWorkers {
                                         panic_message(payload)
                                     ))
                                 });
+                            // The source-read boundary is true once all bytes
+                            // that were admitted from the source have reached
+                            // staging, even if subsequent stability validation
+                            // or CAS installation rejects the file.
+                            if staged_bytes > 0 {
+                                observer.observe(IngestEvent::SourceReadCompleted {
+                                    sequence: work.sequence,
+                                    source_path: work.candidate.relative_path.clone(),
+                                    mount_id,
+                                    size_bytes: staged_bytes,
+                                });
+                            }
                             if let Err(error) = result {
                                 let failure = SourceWorkerFailure {
                                     sequence: Some(work.sequence),
@@ -1295,6 +1576,9 @@ fn dry_run_import(config: ImportConfig, observer: &dyn IngestObserver) -> Result
         };
         let mut sequence = 0_u64;
         for candidate in scan_source(&config.source_root) {
+            if observer.cancelled() {
+                return Err(eyre!("telemetry renderer failed"));
+            }
             let candidate = candidate?;
             observer.observe(IngestEvent::CandidateDiscovered {
                 sequence,
@@ -1339,8 +1623,28 @@ fn dry_run_import(config: ImportConfig, observer: &dyn IngestObserver) -> Result
                         source_path: candidate.relative_path.clone(),
                         mount_id: candidate.mount_id,
                     });
-                    let blob =
-                        store.hash_file_read_only(&candidate.absolute_path, config.chunk_size)?;
+                    let sequence_for_chunk = sequence;
+                    let source_path_for_chunk = candidate.relative_path.clone();
+                    let mount_id_for_chunk = candidate.mount_id;
+                    let blob = store.hash_file_read_only_with_chunk_observer(
+                        &candidate.absolute_path,
+                        config.chunk_size,
+                        |size_bytes| {
+                            observer.observe(IngestEvent::SourceChunkStaged {
+                                sequence: sequence_for_chunk,
+                                source_path: source_path_for_chunk.clone(),
+                                mount_id: mount_id_for_chunk,
+                                size_bytes,
+                            });
+                            if observer.cancelled() {
+                                return Err(eyre!("telemetry renderer failed"));
+                            }
+                            Ok(())
+                        },
+                    )?;
+                    if observer.cancelled() {
+                        return Err(eyre!("telemetry renderer failed"));
+                    }
                     observer.observe(IngestEvent::SourceReadCompleted {
                         sequence,
                         source_path: candidate.relative_path.clone(),

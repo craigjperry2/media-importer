@@ -218,7 +218,7 @@ fn reimport_resurrects_atomically_and_restores_build_tree_visibility() {
 
     Command::cargo_bin("media-importer")
         .unwrap()
-        .args(["import", "--store"])
+        .args(["--output", "human", "import", "--store"])
         .arg(temp.child("store").path())
         .arg("--source")
         .arg(temp.child("source").path())
@@ -228,7 +228,7 @@ fn reimport_resurrects_atomically_and_restores_build_tree_visibility() {
 
     Command::cargo_bin("media-importer")
         .unwrap()
-        .args(["build-tree", "--store"])
+        .args(["--output", "human", "build-tree", "--store"])
         .arg(temp.child("store").path())
         .arg("--browse-tree")
         .arg(temp.child("browse").path())
@@ -606,7 +606,7 @@ fn missing_store_blobs_and_catalog_are_validation_errors_and_are_never_created()
     let missing_store = temp.child("missing-store");
     Command::cargo_bin("media-importer")
         .unwrap()
-        .args(["gc", "--store"])
+        .args(["--output", "human", "gc", "--store"])
         .arg(missing_store.path())
         .assert()
         .code(1)
@@ -805,7 +805,7 @@ fn imported(content: &str) -> TempDir {
 fn import_existing_source(temp: &TempDir) {
     Command::cargo_bin("media-importer")
         .unwrap()
-        .args(["import", "--store"])
+        .args(["--output", "human", "import", "--store"])
         .arg(temp.child("store").path())
         .arg("--source")
         .arg(temp.child("source").path())
@@ -816,7 +816,7 @@ fn import_existing_source(temp: &TempDir) {
 fn gc(temp: &TempDir, extra: &[&str]) -> assert_cmd::assert::Assert {
     let mut command = Command::cargo_bin("media-importer").unwrap();
     command
-        .args(["gc", "--store"])
+        .args(["--output", "human", "gc", "--store"])
         .arg(temp.child("store").path())
         .args(extra);
     command.assert()

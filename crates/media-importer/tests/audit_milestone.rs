@@ -11,7 +11,7 @@ fn import(temp: &TempDir) {
     temp.child("source/a.txt").write_str("abcdef").unwrap();
     Command::cargo_bin("media-importer")
         .unwrap()
-        .args(["import", "--store"])
+        .args(["--output", "human", "import", "--store"])
         .arg(temp.child("store").path())
         .arg("--source")
         .arg(temp.child("source").path())
@@ -34,7 +34,7 @@ fn help_exposes_all_milestone_four_commands() {
 fn clean_imported_store_audits_with_exact_counters() {
     let temp = TempDir::new().unwrap();
     import(&temp);
-    Command::cargo_bin("media-importer").unwrap().args(["audit", "--store"])
+    Command::cargo_bin("media-importer").unwrap().args(["--output", "human", "audit", "--store"])
         .arg(temp.child("store").path()).arg("--chunk-size").arg("2").assert().success()
         .stdout(predicate::str::contains("Audit clean\nCatalog blobs: 1\nCAS blob files: 1\nBlobs hashed: 1\nGC candidates: 0\nFindings: 0"));
 }
@@ -65,7 +65,7 @@ fn missing_blob_is_finding_and_exit_two() {
     std::fs::remove_file(blob).unwrap();
     Command::cargo_bin("media-importer")
         .unwrap()
-        .args(["audit", "--store"])
+        .args(["--output", "human", "audit", "--store"])
         .arg(temp.child("store").path())
         .assert()
         .code(2)
@@ -273,7 +273,7 @@ fn foreign_key_and_source_domain_failures_are_distinct_findings() {
     import(&temp);
     let connection = Connection::open(temp.child("store/catalog.sqlite").path()).unwrap();
     connection
-        .execute_batch("PRAGMA foreign_keys=OFF;")
+        .execute_batch("PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON;")
         .unwrap();
     connection
         .execute(
@@ -389,7 +389,7 @@ fn empty_valid_shards_are_clean_and_findings_are_category_sorted() {
 fn audit(temp: &TempDir) -> assert_cmd::assert::Assert {
     let mut command = Command::cargo_bin("media-importer").unwrap();
     command
-        .args(["audit", "--store"])
+        .args(["--output", "human", "audit", "--store"])
         .arg(temp.child("store").path())
         .assert()
 }

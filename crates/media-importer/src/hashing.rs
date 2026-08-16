@@ -18,7 +18,24 @@ pub fn hash_file(path: &Path, chunk_size: NonZeroUsize) -> Result<HashResult> {
     hash_open_file(&mut file, chunk_size)
 }
 
+pub fn hash_file_with_chunk_observer(
+    path: &Path,
+    chunk_size: NonZeroUsize,
+    on_chunk_read: impl FnMut(u64) -> Result<()>,
+) -> Result<HashResult> {
+    let mut file = File::open(path).wrap_err_with(|| format!("open source file {:?}", path))?;
+    hash_open_file_with_chunk_observer(&mut file, chunk_size, on_chunk_read)
+}
+
 pub fn hash_open_file(file: &mut File, chunk_size: NonZeroUsize) -> Result<HashResult> {
+    hash_open_file_with_chunk_observer(file, chunk_size, |_| Ok(()))
+}
+
+pub fn hash_open_file_with_chunk_observer(
+    file: &mut File,
+    chunk_size: NonZeroUsize,
+    mut on_chunk_read: impl FnMut(u64) -> Result<()>,
+) -> Result<HashResult> {
     let mut hasher = blake3::Hasher::new();
     let mut buffer = Vec::new();
     buffer
@@ -33,6 +50,7 @@ pub fn hash_open_file(file: &mut File, chunk_size: NonZeroUsize) -> Result<HashR
             break;
         }
         hasher.update(&buffer[..bytes_read]);
+        on_chunk_read(bytes_read as u64)?;
         size_bytes = size_bytes
             .checked_add(bytes_read as u64)
             .ok_or_else(|| eyre!("hashed byte count overflow"))?;
@@ -48,6 +66,19 @@ pub fn hash_reader_to_writer(
     reader: &mut File,
     writer: &mut File,
     chunk_size: NonZeroUsize,
+) -> Result<HashResult> {
+    hash_reader_to_writer_with_chunk_observer(reader, writer, chunk_size, |_| Ok(()))
+}
+
+/// Hash and stage one source stream, reporting only bytes that have been
+/// written to staging. The observer is invoked once per completed chunk, so a
+/// caller can promptly turn renderer failure into cooperative cancellation
+/// without a second source read.
+pub fn hash_reader_to_writer_with_chunk_observer(
+    reader: &mut File,
+    writer: &mut File,
+    chunk_size: NonZeroUsize,
+    mut on_chunk_written: impl FnMut(u64) -> Result<()>,
 ) -> Result<HashResult> {
     let mut hasher = blake3::Hasher::new();
     let mut buffer = Vec::new();
@@ -66,6 +97,7 @@ pub fn hash_reader_to_writer(
         writer
             .write_all(&buffer[..bytes_read])
             .wrap_err("write staging file")?;
+        on_chunk_written(bytes_read as u64)?;
         size_bytes = size_bytes
             .checked_add(bytes_read as u64)
             .ok_or_else(|| eyre!("copied byte count overflow"))?;

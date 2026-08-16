@@ -1,14 +1,16 @@
 use std::fs;
+use std::sync::Arc;
 
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, eyre};
 
 use crate::catalog::inspect_catalog_for_audit;
 use crate::config::AuditConfig;
-use crate::hashing::hash_open_file;
+use crate::hashing::hash_open_file_with_chunk_observer;
 use crate::integrity::{IntegrityFinding, push_finding, sort_and_deduplicate};
 use crate::run_lock::{LockMode, StoreRunLock};
 use crate::store::{inspect_cas, open_blob_no_follow};
+use crate::telemetry::{NoopTelemetrySink, TelemetryEvent, TelemetrySink};
 
 pub type AuditFinding = IntegrityFinding;
 
@@ -28,8 +30,20 @@ impl AuditReport {
 }
 
 pub fn audit_store(config: AuditConfig) -> Result<AuditReport> {
+    audit_store_with_telemetry(config, Arc::new(NoopTelemetrySink))
+}
+
+pub fn audit_store_with_telemetry(
+    config: AuditConfig,
+    telemetry: Arc<dyn TelemetrySink>,
+) -> Result<AuditReport> {
     let _lock = StoreRunLock::acquire(&config.store_root, "audit", LockMode::Shared)?;
     let snapshot = inspect_catalog_for_audit(&config.db_path)?;
+    telemetry.emit(
+        TelemetryEvent::new("audit", "audit_catalog_scanned")
+            .field("catalog_blobs", snapshot.blob_rows_seen)
+            .field("gc_candidates", snapshot.gc_candidates),
+    );
     let cas = inspect_cas(&config.store_root)?;
     let mut findings = snapshot.findings;
     findings
@@ -38,6 +52,9 @@ pub fn audit_store(config: AuditConfig) -> Result<AuditReport> {
     findings.extend(cas.findings);
     let cas_blob_files =
         u64::try_from(cas.valid_blobs.len()).wrap_err("CAS blob count overflow")?;
+    telemetry.emit(
+        TelemetryEvent::new("audit", "audit_cas_scanned").field("cas_blob_files", cas_blob_files),
+    );
 
     let mut keys = Vec::new();
     keys.try_reserve(
@@ -54,6 +71,11 @@ pub fn audit_store(config: AuditConfig) -> Result<AuditReport> {
 
     let mut blobs_hashed = 0_u64;
     for hash in keys {
+        if telemetry.failed() {
+            return Err(eyre!("telemetry renderer failed"));
+        }
+        telemetry
+            .emit(TelemetryEvent::new("audit", "blob_discovered").field("hash", hash.to_string()));
         let catalog = snapshot.valid_blobs.get(&hash);
         let path = config.store_root.blob_path(&hash);
         let display = crate::integrity::escape_path(
@@ -96,11 +118,26 @@ pub fn audit_store(config: AuditConfig) -> Result<AuditReport> {
         }
 
         match open_blob_no_follow(&config.store_root, &hash) {
-            Ok(mut opened) => match hash_open_file(&mut opened.file, config.chunk_size) {
+            Ok(mut opened) => match hash_open_file_with_chunk_observer(
+                &mut opened.file,
+                config.chunk_size,
+                |_| {
+                    if telemetry.failed() {
+                        Err(eyre!("telemetry renderer failed"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            ) {
                 Ok(actual) => {
                     blobs_hashed = blobs_hashed
                         .checked_add(1)
                         .ok_or_else(|| eyre!("hashed blob counter overflow"))?;
+                    telemetry.emit(
+                        TelemetryEvent::new("audit", "blob_hashed")
+                            .field("hash", hash.to_string())
+                            .field("bytes_read", actual.size_bytes),
+                    );
                     let expected_size = catalog
                         .map(|blob| blob.size_bytes)
                         .unwrap_or(opened.identity.len);
@@ -130,6 +167,7 @@ pub fn audit_store(config: AuditConfig) -> Result<AuditReport> {
                         )?;
                     }
                 }
+                Err(error) if telemetry.failed() => return Err(error),
                 Err(_) => push_finding(
                     &mut findings,
                     AuditFinding::new(
@@ -151,6 +189,16 @@ pub fn audit_store(config: AuditConfig) -> Result<AuditReport> {
     }
 
     sort_and_deduplicate(&mut findings);
+    for finding in &findings {
+        if telemetry.failed() {
+            return Err(eyre!("telemetry renderer failed"));
+        }
+        telemetry.emit(
+            TelemetryEvent::new("audit", "finding")
+                .field("category", finding.category)
+                .field("identity", finding.identity.clone()),
+        );
+    }
     Ok(AuditReport {
         catalog_blobs: snapshot.blob_rows_seen,
         cas_blob_files,

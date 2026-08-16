@@ -10,7 +10,9 @@ use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, bail, eyre};
 use tracing::debug;
 
-use crate::hashing::{hash_file, hash_reader_to_writer};
+use crate::hashing::{
+    hash_file, hash_file_with_chunk_observer, hash_reader_to_writer_with_chunk_observer,
+};
 use crate::integrity::{IntegrityFinding, push_finding};
 use crate::paths::{BlobHash, StagingFileName, StoreRoot};
 
@@ -86,21 +88,20 @@ impl Store {
         expected_size: u64,
         chunk_size: NonZeroUsize,
     ) -> Result<StoredBlob> {
-        self.ingest_file_with_read_observer(source_path, expected_size, chunk_size, |_| {})
+        self.ingest_file_with_read_observer(source_path, expected_size, chunk_size, |_| Ok(()))
     }
 
     /// Import one file while reporting the completed source-read boundary.
     ///
-    /// The callback runs immediately after the single source-to-staging pass,
-    /// before source stability validation or CAS installation.  This lets the
-    /// ingest executor report true source I/O even when a later operation
-    /// fails, without introducing a second source read.
+    /// The callback runs after each chunk reaches staging, before the next
+    /// source read. This provides exact source/staging byte facts and a safe
+    /// cooperative cancellation point without a second source read.
     pub(crate) fn ingest_file_with_read_observer(
         &self,
         source_path: &Path,
         expected_size: u64,
         chunk_size: NonZeroUsize,
-        on_read_complete: impl FnOnce(u64),
+        on_chunk_written: impl FnMut(u64) -> Result<()>,
     ) -> Result<StoredBlob> {
         let before = fs::metadata(source_path)
             .wrap_err_with(|| format!("stat source file before import {:?}", source_path))?;
@@ -120,7 +121,12 @@ impl Store {
         // path.  Successful installs remove it explicitly before returning.
         let _staging_cleanup = StagingCleanup::new(&staging_path);
 
-        let hash_result = match hash_reader_to_writer(&mut source, &mut staging, chunk_size) {
+        let hash_result = match hash_reader_to_writer_with_chunk_observer(
+            &mut source,
+            &mut staging,
+            chunk_size,
+            on_chunk_written,
+        ) {
             Ok(result) => result,
             Err(error) => {
                 remove_staging_best_effort(&staging_path);
@@ -129,8 +135,6 @@ impl Store {
             }
         };
         drop(staging);
-        on_read_complete(hash_result.size_bytes);
-
         if hash_result.size_bytes != expected_size {
             remove_staging_best_effort(&staging_path);
             bail!(
@@ -264,6 +268,24 @@ impl Store {
         let hash_result = hash_file(source_path, chunk_size)?;
         let presence = self.check_blob_presence(&hash_result.hash, hash_result.size_bytes)?;
         let outcome = match presence {
+            BlobPresence::Missing => StoreOutcome::Created,
+            BlobPresence::Present => StoreOutcome::Reused,
+        };
+        Ok(StoredBlob {
+            hash: hash_result.hash,
+            size_bytes: hash_result.size_bytes,
+            outcome,
+        })
+    }
+
+    pub(crate) fn hash_file_read_only_with_chunk_observer(
+        &self,
+        source_path: &Path,
+        chunk_size: NonZeroUsize,
+        on_chunk_read: impl FnMut(u64) -> Result<()>,
+    ) -> Result<StoredBlob> {
+        let hash_result = hash_file_with_chunk_observer(source_path, chunk_size, on_chunk_read)?;
+        let outcome = match self.check_blob_presence(&hash_result.hash, hash_result.size_bytes)? {
             BlobPresence::Missing => StoreOutcome::Created,
             BlobPresence::Present => StoreOutcome::Reused,
         };

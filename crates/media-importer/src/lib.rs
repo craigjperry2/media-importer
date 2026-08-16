@@ -11,5 +11,6 @@ pub mod paths;
 pub mod run_lock;
 pub mod scanner;
 pub mod store;
+pub mod telemetry;
 
 mod test_probe;

@@ -16,8 +16,11 @@ blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
 crossbeam-channel = "0.5"
+indicatif = "0.18"
 libc = "0.2"
 rusqlite = { version = "0.39", features = ["backup", "bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4"] }
@@ -26,5 +29,6 @@ walkdir = "2"
 [dev-dependencies]
 assert_cmd = "2"
 assert_fs = "1"
+portable-pty = "0.9"
 predicates = "3"
 regex = "1"

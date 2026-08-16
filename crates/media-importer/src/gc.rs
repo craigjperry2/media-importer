@@ -11,11 +11,11 @@ use color_eyre::eyre::{WrapErr, eyre};
 use tracing::info;
 
 use crate::catalog::{
-    CatalogAuditSnapshot, CatalogBlob, CatalogWriterConfig, CatalogWriterHandle, Clock,
-    GcWriteSession, SystemClock, inspect_catalog_for_gc_dry_run,
+    CatalogAuditSnapshot, CatalogBlob, CatalogWriterConfig, CatalogWriterEvent,
+    CatalogWriterHandle, Clock, GcWriteSession, SystemClock, inspect_catalog_for_gc_dry_run,
 };
 use crate::config::GcConfig;
-use crate::hashing::hash_open_file;
+use crate::hashing::hash_open_file_with_chunk_observer;
 use crate::integrity::{IntegrityFinding, push_finding, sort_and_deduplicate};
 use crate::paths::BlobHash;
 use crate::run_lock::{LockMode, StoreRunLock};
@@ -23,7 +23,9 @@ use crate::store::{
     BlobFileIdentity, inspect_cas, open_blob_no_follow, remove_blob_file,
     revalidate_blob_for_removal, sync_blob_parent, sync_nearest_existing_blob_parent,
 };
+use crate::telemetry::{NoopTelemetrySink, TelemetryEvent, TelemetrySink};
 use crate::test_probe;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum GcActionKind {
@@ -220,7 +222,95 @@ impl GcStoreMutator for FilesystemGcMutator {
 }
 
 pub fn collect_garbage(config: GcConfig) -> Result<GcOutcome> {
-    collect_garbage_with_dependencies(config, &SystemClock, &FilesystemGcMutator)
+    collect_garbage_with_telemetry(config, Arc::new(NoopTelemetrySink))
+}
+
+/// Run GC through the reporting boundary.  GC's durable action report is
+/// assembled transactionally, so actions are emitted only after their outcome
+/// is known and in its deterministic report order.
+pub fn collect_garbage_with_telemetry(
+    config: GcConfig,
+    telemetry: Arc<dyn TelemetrySink>,
+) -> Result<GcOutcome> {
+    collect_garbage_with_dependencies_and_telemetry(
+        config,
+        &SystemClock,
+        &FilesystemGcMutator,
+        telemetry,
+    )
+}
+
+fn emit_gc_preflight_complete(telemetry: &dyn TelemetrySink, report: &GcReport) {
+    telemetry.emit(
+        TelemetryEvent::new("gc", "gc_preflight_hashed")
+            .field("blobs_hashed", report.sweep_candidates_hashed)
+            .field("dry_run", report.dry_run),
+    );
+    telemetry.emit(
+        TelemetryEvent::new("gc", "gc_preflight_complete")
+            .field("catalog_blobs", report.catalog_blobs)
+            .field("reachable_blobs", report.reachable_blobs)
+            .field(
+                "planned_actions",
+                report.planned_marks + report.planned_resurrections + report.planned_sweeps,
+            )
+            .field("findings", report.findings.len() as u64)
+            .field("bytes_reclaimable", report.bytes_reclaimable)
+            .field("dry_run", report.dry_run),
+    );
+}
+
+/// Emit only facts that are durable (or, for dry run, fully planned).  This
+/// runs immediately after the catalog transaction commits rather than being
+/// deferred until command teardown, so the dashboard and JSONL consumers see
+/// real GC progress while the process is still alive.
+fn emit_gc_actions_after_commit(telemetry: &dyn TelemetrySink, report: &GcReport) {
+    if !report.dry_run {
+        telemetry.emit(
+            TelemetryEvent::new("gc", "gc_catalog_committed")
+                .field("marks", report.completed_marks)
+                .field("resurrections", report.completed_resurrections)
+                .field("sweeps", report.completed_sweeps)
+                .field("cas_files_removed", report.cas_files_removed)
+                .field("bytes_unlinked", report.bytes_unlinked)
+                .field("bytes_reclaimed", report.bytes_reclaimed),
+        );
+    }
+    // The report normally arrives in this order from the apply plan, but
+    // JSONL is a public append-only interface rather than an implementation
+    // detail of that plan. Preserve the same documented kind/hash ordering as
+    // the human renderer even if a future recovery path constructs actions in
+    // a different order.
+    let mut actions: Vec<&GcAction> = report.actions.iter().collect();
+    actions.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.hash.cmp(&right.hash))
+    });
+    for action in actions {
+        let sweep_source_state = action.sweep_source_state.map(|state| match state {
+            SweepSourceState::Present => "present",
+            SweepSourceState::AlreadyAbsent => "already_absent",
+        });
+        telemetry.emit(
+            TelemetryEvent::new("gc", "gc_action")
+                .field("kind", format!("{:?}", action.kind).to_ascii_lowercase())
+                .field("hash", action.hash.to_string())
+                .field("size_bytes", action.size_bytes)
+                .field("dry_run", report.dry_run)
+                .field("sweep_source_state", sweep_source_state.unwrap_or("none")),
+        );
+    }
+}
+
+fn emit_gc_findings(telemetry: &dyn TelemetrySink, report: &GcReport) {
+    for finding in &report.findings {
+        telemetry.emit(
+            TelemetryEvent::new("gc", "finding")
+                .field("category", finding.category)
+                .field("identity", finding.identity.clone()),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -228,11 +318,27 @@ fn collect_garbage_with_clock(config: GcConfig, clock: &dyn Clock) -> Result<GcO
     collect_garbage_with_dependencies(config, clock, &FilesystemGcMutator)
 }
 
+#[cfg(test)]
 fn collect_garbage_with_dependencies(
     config: GcConfig,
     clock: &dyn Clock,
     mutator: &dyn GcStoreMutator,
 ) -> Result<GcOutcome> {
+    collect_garbage_with_dependencies_and_telemetry(
+        config,
+        clock,
+        mutator,
+        Arc::new(NoopTelemetrySink),
+    )
+}
+
+fn collect_garbage_with_dependencies_and_telemetry(
+    config: GcConfig,
+    clock: &dyn Clock,
+    mutator: &dyn GcStoreMutator,
+    telemetry: Arc<dyn TelemetrySink>,
+) -> Result<GcOutcome> {
+    check_telemetry(telemetry.as_ref())?;
     info!(
         store = ?config.store_root.path(),
         catalog = ?config.db_path,
@@ -246,18 +352,28 @@ fn collect_garbage_with_dependencies(
     };
     let _lock = StoreRunLock::acquire(&config.store_root, "gc", mode)?;
     let outcome = if config.dry_run {
-        collect_dry_run(config)
+        collect_dry_run(config, telemetry.as_ref())
     } else {
-        collect_real(config, clock, mutator)
+        collect_real(config, clock, mutator, telemetry.as_ref())
     }?;
     test_probe::pause("gc-outcome-constructed")?;
+    check_telemetry(telemetry.as_ref())?;
     Ok(outcome)
 }
 
-fn collect_dry_run(config: GcConfig) -> Result<GcOutcome> {
+fn check_telemetry(telemetry: &dyn TelemetrySink) -> Result<()> {
+    if telemetry.failed() {
+        return Err(eyre!("telemetry renderer failed"));
+    }
+    Ok(())
+}
+
+fn collect_dry_run(config: GcConfig, telemetry: &dyn TelemetrySink) -> Result<GcOutcome> {
     let snapshot = inspect_catalog_for_gc_dry_run(&config.db_path)?;
-    let mut preflight = run_preflight(&config, snapshot)?;
+    let mut preflight = run_preflight(&config, snapshot, telemetry)?;
+    emit_gc_preflight_complete(telemetry, &preflight.report);
     if !preflight.report.findings.is_empty() {
+        emit_gc_findings(telemetry, &preflight.report);
         return Ok(GcOutcome::Blocked(preflight.report));
     }
 
@@ -274,24 +390,28 @@ fn collect_dry_run(config: GcConfig) -> Result<GcOutcome> {
         .try_reserve_exact(action_count)
         .map_err(|error| eyre!("reserve GC dry-run actions: {error}"))?;
     for blob in preflight.plan.marks {
+        check_telemetry(telemetry)?;
         preflight
             .report
             .actions
             .push(action_for(GcActionKind::Mark, &blob, None));
     }
     for blob in preflight.plan.resurrections {
+        check_telemetry(telemetry)?;
         preflight
             .report
             .actions
             .push(action_for(GcActionKind::Resurrect, &blob, None));
     }
     for candidate in preflight.sweep_candidates {
+        check_telemetry(telemetry)?;
         preflight.report.actions.push(action_for(
             GcActionKind::Sweep,
             &candidate.blob,
             Some(candidate.source_state),
         ));
     }
+    emit_gc_actions_after_commit(telemetry, &preflight.report);
     Ok(GcOutcome::Complete(preflight.report))
 }
 
@@ -299,39 +419,70 @@ fn collect_real(
     config: GcConfig,
     clock: &dyn Clock,
     mutator: &dyn GcStoreMutator,
+    telemetry: &dyn TelemetrySink,
 ) -> Result<GcOutcome> {
     let writer = CatalogWriterHandle::spawn_existing_for_gc(
         config.db_path.clone(),
         CatalogWriterConfig::default(),
     )?;
+    // Keep a receiver independent of the writer handle so the terminal
+    // shutdown checkpoint can be bridged after `finish` consumes that handle.
+    let catalog_events = writer.events();
     let (session, snapshot) = match writer.begin_gc() {
         Ok(value) => value,
         Err(error) => {
-            return finish_writer_after_gc_error(writer, error);
+            return finish_writer_after_gc_error(writer, &catalog_events, telemetry, error);
         }
     };
-    let preflight = match run_preflight(&config, snapshot) {
+    let preflight = match run_preflight(&config, snapshot, telemetry) {
         Ok(value) => value,
         Err(error) => {
             let terminal = session.rollback();
-            return finish_writer_after_gc_terminal_error(writer, error, terminal);
+            return finish_writer_after_gc_terminal_error(
+                writer,
+                &catalog_events,
+                telemetry,
+                error,
+                terminal,
+            );
         }
     };
+    emit_gc_preflight_complete(telemetry, &preflight.report);
     if let Err(error) = test_probe::pause("gc-preflight-complete") {
         let terminal = session.rollback();
-        return finish_writer_after_gc_terminal_error(writer, error, terminal);
+        return finish_writer_after_gc_terminal_error(
+            writer,
+            &catalog_events,
+            telemetry,
+            error,
+            terminal,
+        );
     }
     if !preflight.report.findings.is_empty() {
+        emit_gc_findings(telemetry, &preflight.report);
         match session.rollback() {
             Ok(()) => {
-                writer.finish()?;
+                let finish = writer.finish();
+                drain_gc_catalog_events(&catalog_events, telemetry);
+                finish?;
                 return Ok(GcOutcome::Blocked(preflight.report));
             }
-            Err(error) => return finish_writer_after_gc_error(writer, error),
+            Err(error) => {
+                return finish_writer_after_gc_error(writer, &catalog_events, telemetry, error);
+            }
         }
     }
-    let result = apply_plan(config, session, preflight, clock, mutator);
+    let result = apply_plan(config, session, preflight, clock, mutator, telemetry);
+    if let Ok(GcOutcome::Incomplete { report, .. }) = &result
+        && !report.actions.is_empty()
+    {
+        // Interrupted sweeps can commit an intentionally partial catalog
+        // transaction. Those actions are durable and must reach telemetry
+        // before main renders the matching incomplete summary.
+        emit_gc_actions_after_commit(telemetry, report);
+    }
     let finish = writer.finish();
+    drain_gc_catalog_events(&catalog_events, telemetry);
     match (result, finish) {
         (Ok(outcome), Ok(_)) => Ok(outcome),
         (Ok(_), Err(writer_error)) => Err(writer_error),
@@ -344,11 +495,51 @@ fn collect_real(
     }
 }
 
+/// Bridge catalog-owned durable lifecycle facts without letting the GC shell
+/// expose SQLite writer topology to its caller.  In particular, both a normal
+/// and a partial GC commit can cause a managed checkpoint, and every writer
+/// shutdown performs the final passive checkpoint.
+fn drain_gc_catalog_events(
+    events: &crossbeam_channel::Receiver<CatalogWriterEvent>,
+    telemetry: &dyn TelemetrySink,
+) {
+    for event in events.try_iter() {
+        match event {
+            CatalogWriterEvent::CheckpointCompleted {
+                busy,
+                log,
+                checkpointed,
+            } => telemetry.emit(
+                TelemetryEvent::new("gc", "catalog_checkpoint_completed")
+                    .field("busy", busy as u64)
+                    .field("log", log as u64)
+                    .field("checkpointed", checkpointed as u64),
+            ),
+            CatalogWriterEvent::GcCommitted => telemetry.emit(
+                TelemetryEvent::new("gc", "gc_catalog_transaction_committed")
+                    .field("partial", false),
+            ),
+            CatalogWriterEvent::GcPartiallyCommitted => telemetry.emit(
+                TelemetryEvent::new("gc", "gc_catalog_transaction_committed")
+                    .field("partial", true),
+            ),
+            _ => {}
+        }
+    }
+}
+
 fn finish_writer_after_gc_error<T>(
     writer: CatalogWriterHandle,
+    catalog_events: &crossbeam_channel::Receiver<CatalogWriterEvent>,
+    telemetry: &dyn TelemetrySink,
     error: color_eyre::Report,
 ) -> Result<T> {
-    match writer.finish() {
+    let finish = writer.finish();
+    // The writer's final passive checkpoint is emitted even when GC stopped
+    // before preflight, rolled back due to a finding, or failed while ending a
+    // session. Drain after every termination path, not only the happy path.
+    drain_gc_catalog_events(catalog_events, telemetry);
+    match finish {
         Ok(_) => Err(error),
         // The writer owns the mutation failure. If it reports a terminal
         // failure, retain that source as canonical and attach the operation
@@ -361,6 +552,8 @@ fn finish_writer_after_gc_error<T>(
 
 fn finish_writer_after_gc_terminal_error<T>(
     writer: CatalogWriterHandle,
+    catalog_events: &crossbeam_channel::Receiver<CatalogWriterEvent>,
+    telemetry: &dyn TelemetrySink,
     error: color_eyre::Report,
     terminal: Result<()>,
 ) -> Result<T> {
@@ -370,11 +563,28 @@ fn finish_writer_after_gc_terminal_error<T>(
             "garbage collection also failed to terminate its writer session: {terminal_error:#}"
         )),
     };
-    finish_writer_after_gc_error(writer, error)
+    finish_writer_after_gc_error(writer, catalog_events, telemetry, error)
 }
 
-fn run_preflight(config: &GcConfig, snapshot: CatalogAuditSnapshot) -> Result<Preflight> {
+fn run_preflight(
+    config: &GcConfig,
+    snapshot: CatalogAuditSnapshot,
+    telemetry: &dyn TelemetrySink,
+) -> Result<Preflight> {
     let (plan, reachable_blobs) = build_plan(&snapshot)?;
+    let planned_actions = plan
+        .marks
+        .len()
+        .checked_add(plan.resurrections.len())
+        .and_then(|count| count.checked_add(plan.sweeps.len()))
+        .ok_or_else(|| eyre!("GC action count overflow"))?;
+    telemetry.emit(
+        TelemetryEvent::new("gc", "gc_preflight_started")
+            .field("sweep_candidates", plan.sweeps.len() as u64)
+            .field("planned_actions", planned_actions as u64)
+            .field("dry_run", config.dry_run),
+    );
+    check_telemetry(telemetry)?;
     let mut report = GcReport {
         dry_run: config.dry_run,
         catalog_blobs: snapshot.blob_rows_seen,
@@ -460,17 +670,28 @@ fn run_preflight(config: &GcConfig, snapshot: CatalogAuditSnapshot) -> Result<Pr
         .try_reserve_exact(plan.sweeps.len())
         .map_err(|error| eyre!("reserve GC sweep candidates: {error}"))?;
     for blob in &plan.sweeps {
+        check_telemetry(telemetry)?;
         if cas.valid_blobs.contains(&blob.hash) {
             let path = config.store_root.blob_path(&blob.hash);
             let display = display_path(config, &path);
             let mut identity = None;
             match open_blob_no_follow(&config.store_root, &blob.hash) {
-                Ok(mut opened) => match hash_open_file(&mut opened.file, config.chunk_size) {
+                Ok(mut opened) => match hash_open_file_with_chunk_observer(
+                    &mut opened.file,
+                    config.chunk_size,
+                    |_| check_telemetry(telemetry),
+                ) {
                     Ok(actual) => {
                         report.sweep_candidates_hashed = report
                             .sweep_candidates_hashed
                             .checked_add(1)
                             .ok_or_else(|| eyre!("sweep candidate hash counter overflow"))?;
+                        telemetry.emit(
+                            TelemetryEvent::new("gc", "gc_blob_hashed")
+                                .field("hash", blob.hash.to_string())
+                                .field("bytes_read", actual.size_bytes)
+                                .field("dry_run", config.dry_run),
+                        );
                         let size_matches = opened.identity.len == blob.size_bytes
                             && actual.size_bytes == blob.size_bytes
                             && actual.size_bytes == opened.identity.len;
@@ -506,6 +727,7 @@ fn run_preflight(config: &GcConfig, snapshot: CatalogAuditSnapshot) -> Result<Pr
                             identity = Some(opened.identity);
                         }
                     }
+                    Err(error) if telemetry.failed() => return Err(error),
                     Err(_) => push_finding(
                         &mut report.findings,
                         IntegrityFinding::new(
@@ -587,6 +809,7 @@ fn apply_plan(
     mut preflight: Preflight,
     clock: &dyn Clock,
     mutator: &dyn GcStoreMutator,
+    telemetry: &dyn TelemetrySink,
 ) -> Result<GcOutcome> {
     let total_actions = preflight
         .plan
@@ -609,6 +832,16 @@ fn apply_plan(
     let mut sweep_mutations_started = false;
     let marked_at_ms = clock.now_ms();
     for blob in &preflight.plan.marks {
+        if let Err(error) = check_telemetry(telemetry) {
+            return abort_apply(
+                transaction,
+                preflight.report,
+                staged_actions,
+                progress,
+                sweep_mutations_started,
+                error,
+            );
+        }
         let next_progress = match progress.checked_mark() {
             Ok(next) => next,
             Err(error) => {
@@ -636,6 +869,16 @@ fn apply_plan(
         progress = next_progress;
     }
     for blob in &preflight.plan.resurrections {
+        if let Err(error) = check_telemetry(telemetry) {
+            return abort_apply(
+                transaction,
+                preflight.report,
+                staged_actions,
+                progress,
+                sweep_mutations_started,
+                error,
+            );
+        }
         let next_progress = match progress.checked_resurrection() {
             Ok(next) => next,
             Err(error) => {
@@ -664,6 +907,16 @@ fn apply_plan(
     }
 
     for candidate in &preflight.sweep_candidates {
+        if let Err(error) = check_telemetry(telemetry) {
+            return abort_apply(
+                transaction,
+                preflight.report,
+                staged_actions,
+                progress,
+                sweep_mutations_started,
+                error,
+            );
+        }
         let next_progress =
             match progress.checked_sweep(candidate.blob.size_bytes, candidate.source_state) {
                 Ok(next) => next,
@@ -798,6 +1051,8 @@ fn apply_plan(
     match transaction.commit() {
         Ok(()) => {
             finish_committed(&mut preflight.report, staged_actions, progress);
+            emit_gc_actions_after_commit(telemetry, &preflight.report);
+            check_telemetry(telemetry)?;
             test_probe::pause("gc-commit-complete")?;
             Ok(GcOutcome::Complete(preflight.report))
         }
@@ -966,6 +1221,7 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::num::NonZeroUsize;
+    use std::sync::Mutex;
 
     use assert_fs::TempDir;
 
@@ -1107,6 +1363,114 @@ mod tests {
         assert_eq!(report.cas_files_removed, 0);
         assert_eq!(report.bytes_reclaimed, 0);
         assert_eq!(catalog_blob_count(&config.db_path), 0);
+    }
+
+    #[test]
+    fn partial_sweep_commit_emits_durable_actions_before_the_incomplete_outcome() {
+        let temp = TempDir::new().expect("tempdir");
+        let store_path = temp.path().join("store");
+        fs::create_dir_all(store_path.join("blobs")).expect("create blobs root");
+        let store_root = StoreRoot::validate_existing(&store_path).expect("validate store");
+        let db_path = store_root.default_db_path();
+        let mut catalog = Catalog::open_or_initialize(&db_path).expect("create catalog");
+        let first = add_fixture_blob_at(&store_root, &mut catalog, b"first", "first");
+        let second = add_fixture_blob_at(&store_root, &mut catalog, b"second", "second");
+        drop(catalog);
+        for hash in [&first, &second] {
+            test_support::delete_sources(&db_path, Some(hash)).expect("make blob unreachable");
+            test_support::set_mark(&db_path, hash, 1).expect("mark blob");
+        }
+        let config = GcConfig {
+            store_root,
+            db_path,
+            dry_run: false,
+            chunk_size: NonZeroUsize::new(2).expect("non-zero"),
+        };
+        let sink = Arc::new(RecordingTelemetry::default());
+        let outcome = collect_garbage_with_dependencies_and_telemetry(
+            config,
+            &FixedClock,
+            &FailSecondRemoval {
+                calls: Cell::new(0),
+            },
+            sink.clone(),
+        )
+        .expect("partial GC result");
+
+        let GcOutcome::Incomplete { report, .. } = outcome else {
+            panic!("expected incomplete outcome");
+        };
+        assert_eq!(report.completed_sweeps, 1);
+        let events = sink.events.lock().expect("telemetry events");
+        let commit = events
+            .iter()
+            .position(|event| event.event == "gc_catalog_committed")
+            .expect("partial commit event");
+        let action = events
+            .iter()
+            .position(|event| event.event == "gc_action")
+            .expect("partial action event");
+        assert!(commit < action, "commit must precede its durable action");
+        assert_eq!(events[action].command, "gc");
+        assert!(events.iter().any(|event| {
+            event.event == "gc_catalog_transaction_committed"
+                && event.boolean_field("partial") == Some(true)
+        }));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event == "catalog_checkpoint_completed"),
+            "the partial commit writer shutdown checkpoint must reach GC telemetry"
+        );
+    }
+
+    #[test]
+    fn complete_gc_bridges_its_commit_and_shutdown_checkpoint() {
+        let (_temp, config, _) = marked_unreachable_fixture(b"complete-bridge");
+        let sink = Arc::new(RecordingTelemetry::default());
+        let outcome = collect_garbage_with_dependencies_and_telemetry(
+            config,
+            &FixedClock,
+            &FilesystemGcMutator,
+            sink.clone(),
+        )
+        .expect("complete GC");
+        assert!(matches!(outcome, GcOutcome::Complete(_)));
+
+        let events = sink.events.lock().expect("telemetry events");
+        assert!(events.iter().any(|event| {
+            event.event == "gc_catalog_transaction_committed"
+                && event.boolean_field("partial") == Some(false)
+        }));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event == "catalog_checkpoint_completed")
+        );
+    }
+
+    #[test]
+    fn blocked_real_gc_drains_its_writer_shutdown_events() {
+        let (_temp, config, hash) = marked_unreachable_fixture(b"blocked-bridge");
+        fs::write(config.store_root.blob_path(&hash), b"corrupted-blob")
+            .expect("corrupt required blob");
+        let sink = Arc::new(RecordingTelemetry::default());
+        let outcome = collect_garbage_with_dependencies_and_telemetry(
+            config,
+            &FixedClock,
+            &FilesystemGcMutator,
+            sink.clone(),
+        )
+        .expect("blocked GC is a command outcome");
+        assert!(matches!(outcome, GcOutcome::Blocked(_)));
+        assert!(
+            sink.events
+                .lock()
+                .expect("telemetry events")
+                .iter()
+                .any(|event| event.event == "catalog_checkpoint_completed"),
+            "blocked writer shutdown checkpoint must reach GC telemetry"
+        );
     }
 
     #[test]
@@ -1291,6 +1655,17 @@ mod tests {
     }
 
     struct FixedClock;
+
+    #[derive(Default)]
+    struct RecordingTelemetry {
+        events: Mutex<Vec<TelemetryEvent>>,
+    }
+
+    impl TelemetrySink for RecordingTelemetry {
+        fn emit(&self, event: TelemetryEvent) {
+            self.events.lock().expect("telemetry lock").push(event);
+        }
+    }
 
     impl Clock for FixedClock {
         fn now_ms(&self) -> i64 {

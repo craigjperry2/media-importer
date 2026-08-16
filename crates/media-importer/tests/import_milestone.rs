@@ -160,7 +160,7 @@ fn preinstall_barrier_forces_same_content_cas_race_with_one_create_and_one_reuse
         .expect("configure two-party pre-install barrier");
 
     let child = ProcessCommand::new(assert_cmd::cargo::cargo_bin("media-importer"))
-        .arg("import")
+        .args(["--output", "human", "import"])
         .arg("--store")
         .arg(store.path())
         .arg("--source")
@@ -995,7 +995,7 @@ fn wait_for_path(path: &Path) {
 
 fn run_import_args(source: &Path, store: &Path, extra: &[&str]) -> assert_cmd::assert::Assert {
     let mut cmd = Command::cargo_bin("media-importer").expect("binary exists");
-    cmd.arg("import")
+    cmd.args(["--output", "human", "import"])
         .arg("--store")
         .arg(store)
         .arg("--source")
@@ -1051,7 +1051,7 @@ fn source_observation_state(store: &Path, relative_path: &str) -> (i64, i64) {
 
 fn run_build_tree(store: &Path, browse: &Path, extra: &[&str]) -> assert_cmd::assert::Assert {
     let mut cmd = Command::cargo_bin("media-importer").expect("binary exists");
-    cmd.arg("build-tree")
+    cmd.args(["--output", "human", "build-tree"])
         .arg("--store")
         .arg(store)
         .arg("--browse-tree")

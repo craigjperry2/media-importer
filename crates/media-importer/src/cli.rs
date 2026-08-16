@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
@@ -13,12 +14,34 @@ use crate::config::{
 use crate::gc::{GcAction, GcActionKind, GcReport, SweepSourceState};
 use crate::ingest::ImportReport;
 use crate::materialize::BuildTreeReport;
+use crate::telemetry::OutputMode;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
 pub struct Cli {
+    /// Select human or JSON Lines presentation. `auto` chooses JSON Lines when
+    /// stdout is not a terminal.
+    #[arg(long, global = true, value_enum, default_value_t = OutputModeArg::Auto)]
+    output: OutputModeArg,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum OutputModeArg {
+    Auto,
+    Human,
+    Jsonl,
+}
+
+impl From<OutputModeArg> for OutputMode {
+    fn from(value: OutputModeArg) -> Self {
+        match value {
+            OutputModeArg::Auto => Self::Auto,
+            OutputModeArg::Human => Self::Human,
+            OutputModeArg::Jsonl => Self::Jsonl,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -99,9 +122,19 @@ pub enum CliCommand {
     Gc(GcConfig),
 }
 
+pub struct ParsedCli {
+    pub command: CliCommand,
+    pub output: OutputMode,
+}
+
 impl Cli {
-    pub fn parse_config() -> Result<CliCommand> {
-        Self::parse().try_into()
+    pub fn parse_config() -> Result<ParsedCli> {
+        let cli = Self::parse();
+        let output = cli.output.into();
+        Ok(ParsedCli {
+            command: cli.try_into()?,
+            output,
+        })
     }
 }
 
@@ -147,9 +180,11 @@ impl TryFrom<Cli> for CliCommand {
     }
 }
 
-pub fn render_gc_report(report: &GcReport, incomplete: bool) {
+pub fn render_gc_report(report: &GcReport, incomplete: bool) -> std::io::Result<()> {
+    let mut output = String::new();
+    macro_rules! println { () => { writeln!(&mut output).expect("String writes are infallible") }; ($($arg:tt)*) => { writeln!(&mut output, $($arg)*).expect("String writes are infallible") }; }
     if !report.findings.is_empty() {
-        render_findings(&report.findings);
+        render_findings(&report.findings)?;
         println!();
     }
     if report.findings.is_empty() {
@@ -160,7 +195,7 @@ pub fn render_gc_report(report: &GcReport, incomplete: bool) {
                 .then_with(|| left.hash.cmp(&right.hash))
         });
         for action in actions {
-            render_gc_action(action, report.dry_run);
+            render_gc_action(action, report.dry_run)?;
         }
         if !report.actions.is_empty() {
             println!();
@@ -215,9 +250,12 @@ pub fn render_gc_report(report: &GcReport, incomplete: bool) {
         report.sweep_candidates_hashed
     );
     println!("Findings: {}", report.findings.len());
+    write_human_stdout(&output)
 }
 
-fn render_gc_action(action: &GcAction, dry_run: bool) {
+fn render_gc_action(action: &GcAction, dry_run: bool) -> std::io::Result<()> {
+    let mut output = String::new();
+    macro_rules! println { () => { writeln!(&mut output).expect("String writes are infallible") }; ($($arg:tt)*) => { writeln!(&mut output, $($arg)*).expect("String writes are infallible") }; }
     let prefix = if dry_run { "WOULD_" } else { "" };
     match action.kind {
         GcActionKind::Mark => {
@@ -235,9 +273,12 @@ fn render_gc_action(action: &GcAction, dry_run: bool) {
             }
         }
     }
+    write_human_stdout(&output)
 }
 
-fn render_findings(findings: &[crate::integrity::IntegrityFinding]) {
+fn render_findings(findings: &[crate::integrity::IntegrityFinding]) -> std::io::Result<()> {
+    let mut output = String::new();
+    macro_rules! println { () => { writeln!(&mut output).expect("String writes are infallible") }; ($($arg:tt)*) => { writeln!(&mut output, $($arg)*).expect("String writes are infallible") }; }
     for finding in findings {
         if finding.details.is_empty() {
             println!("{} {}", finding.category, finding.identity);
@@ -248,9 +289,12 @@ fn render_findings(findings: &[crate::integrity::IntegrityFinding]) {
             );
         }
     }
+    write_human_stdout(&output)
 }
 
-pub fn render_audit_report(report: &AuditReport) {
+pub fn render_audit_report(report: &AuditReport) -> std::io::Result<()> {
+    let mut output = String::new();
+    macro_rules! println { () => { writeln!(&mut output).expect("String writes are infallible") }; ($($arg:tt)*) => { writeln!(&mut output, $($arg)*).expect("String writes are infallible") }; }
     if report.is_clean() {
         println!("Audit clean");
     } else {
@@ -272,9 +316,12 @@ pub fn render_audit_report(report: &AuditReport) {
     println!("Blobs hashed: {}", report.blobs_hashed);
     println!("GC candidates: {}", report.gc_candidates);
     println!("Findings: {}", report.findings.len());
+    write_human_stdout(&output)
 }
 
-pub fn render_import_report(report: &ImportReport) {
+pub fn render_import_report(report: &ImportReport) -> std::io::Result<()> {
+    let mut output = String::new();
+    macro_rules! println { () => { writeln!(&mut output).expect("String writes are infallible") }; ($($arg:tt)*) => { writeln!(&mut output, $($arg)*).expect("String writes are infallible") }; }
     if report.dry_run {
         println!("Dry run complete");
         println!("Files seen: {}", report.files_seen);
@@ -317,9 +364,12 @@ pub fn render_import_report(report: &ImportReport) {
         println!("Files hashed: {}", report.files_hashed);
         println!("Bytes hashed: {}", report.bytes_hashed);
     }
+    write_human_stdout(&output)
 }
 
-pub fn render_build_tree_report(report: &BuildTreeReport) {
+pub fn render_build_tree_report(report: &BuildTreeReport) -> std::io::Result<()> {
+    let mut output = String::new();
+    macro_rules! println { () => { writeln!(&mut output).expect("String writes are infallible") }; ($($arg:tt)*) => { writeln!(&mut output, $($arg)*).expect("String writes are infallible") }; }
     if report.dry_run {
         println!("Dry run complete");
         println!("Desired links: {}", report.desired_links);
@@ -351,4 +401,13 @@ pub fn render_build_tree_report(report: &BuildTreeReport) {
         println!("Directories created: {}", report.directories_created);
         println!("Directories pruned: {}", report.directories_pruned);
     }
+    write_human_stdout(&output)
+}
+
+fn write_human_stdout(output: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(output.as_bytes())?;
+    stdout.flush()
 }

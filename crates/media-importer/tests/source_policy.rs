@@ -238,6 +238,29 @@ fn stdout_is_rendered_only_by_cli_facing_modules() {
 }
 
 #[test]
+fn presentation_dependencies_stay_at_the_telemetry_boundary() {
+    let prohibited = ["indicatif", "serde_json", "IsTerminal"];
+    let mut violations = Vec::new();
+    for path in production_rust_files() {
+        if path.file_name().is_some_and(|name| name == "telemetry.rs") {
+            continue;
+        }
+        let source = read(&path);
+        for dependency in prohibited {
+            for found in source.match_indices(dependency) {
+                violations.push(Violation::new(
+                    &path,
+                    line_at(&source, found.0),
+                    "presentation-dependency-outside-telemetry",
+                    format!("keep `{dependency}` behind the command-neutral telemetry boundary"),
+                ));
+            }
+        }
+    }
+    assert_no_violations(violations);
+}
+
+#[test]
 fn rusqlite_is_confined_to_catalog_modules() {
     let reference = Regex::new(r"\brusqlite\s*(?:::|\{)").unwrap();
     let mut violations = Vec::new();

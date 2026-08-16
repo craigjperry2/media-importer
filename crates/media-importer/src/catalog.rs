@@ -18,9 +18,6 @@ use rusqlite::types::ValueRef;
 use std::collections::{BTreeSet, HashMap};
 
 const CURRENT_SCHEMA_VERSION: i64 = 1;
-// Telemetry is advisory. Keep it bounded so a caller that does not subscribe
-// cannot make a long import retain one event per record indefinitely.
-const EVENT_CHANNEL_CAPACITY: usize = 256;
 const AUDIT_BEGIN_SQL: &str = include_str!("catalog/sql/audit_begin.sql");
 const AUDIT_BLOBS_SQL: &str = include_str!("catalog/sql/audit_blobs.sql");
 const AUDIT_COMMIT_SQL: &str = include_str!("catalog/sql/audit_commit.sql");
@@ -1070,7 +1067,15 @@ impl CatalogWriterHandle {
     fn spawn_inner(path: PathBuf, config: CatalogWriterConfig, gc_only: bool) -> Result<Self> {
         let (request_tx, request_rx) = crossbeam_channel::bounded(config.channel_capacity.get());
         let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
-        let (event_tx, events) = crossbeam_channel::bounded(EVENT_CHANNEL_CAPACITY);
+        // Catalog transitions are durable domain facts. This is deliberately
+        // bounded so a stalled command owner cannot turn writer telemetry into
+        // unbounded memory growth. Unlike advisory tracing, the writer uses
+        // the blocking, lossless route below: a committed batch, record, or
+        // checkpoint outcome is never discarded merely because presentation is
+        // slow. The ingest coordinator drains this bridge at every scheduling
+        // and ticket-resolution boundary.
+        const EVENT_BRIDGE_CAPACITY: usize = 256;
+        let (event_tx, events) = crossbeam_channel::bounded(EVENT_BRIDGE_CAPACITY);
         // A writer has exactly one terminal result. Keep that notification
         // separate from per-request responses so import can stop admitting
         // source work as soon as the writer fails.
@@ -2381,9 +2386,7 @@ fn return_gc_begin_failure<T>(connection: &Connection, error: color_eyre::Report
 }
 
 fn emit(events: &Sender<CatalogWriterEvent>, event: CatalogWriterEvent) {
-    if events.try_send(event).is_err() {
-        tracing::trace!("catalog writer telemetry receiver is saturated or closed");
-    }
+    let _ = events.send(event);
 }
 
 fn stage_gc_mark(

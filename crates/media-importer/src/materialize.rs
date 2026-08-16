@@ -11,7 +11,9 @@ use crate::catalog::ReadOnlyCatalog;
 use crate::config::BuildTreeConfig;
 use crate::paths::{BlobHash, output_relative_path, points_inside_blobs, relative_symlink_target};
 use crate::run_lock::{LockMode, StoreRunLock};
+use crate::telemetry::{NoopTelemetrySink, TelemetryEvent, TelemetrySink};
 use crate::test_probe;
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Default)]
 pub struct BuildTreeReport {
@@ -42,32 +44,65 @@ struct Plan {
 }
 
 pub fn build_tree(config: BuildTreeConfig) -> Result<BuildTreeReport> {
+    build_tree_with_telemetry(config, Arc::new(NoopTelemetrySink))
+}
+
+/// Materialize through the command-neutral reporting boundary.  The plan and
+/// apply milestones are emitted at the points they become true; no renderer
+/// concerns leak into filesystem planning or mutation helpers.
+pub fn build_tree_with_telemetry(
+    config: BuildTreeConfig,
+    telemetry: Arc<dyn TelemetrySink>,
+) -> Result<BuildTreeReport> {
     let mode = if config.dry_run {
         LockMode::Shared
     } else {
         LockMode::Exclusive
     };
     let _lock = StoreRunLock::acquire(&config.store_root, "build-tree", mode)?;
-    let plan = plan(&config)?;
+    let plan = plan(&config, telemetry.as_ref())?;
+    telemetry.emit(
+        TelemetryEvent::new("build_tree", "tree_planned")
+            .field("dry_run", config.dry_run)
+            .field("entries", plan.report.desired_links)
+            .field("directories", plan.report.directories_created),
+    );
+    if telemetry.failed() {
+        bail!("telemetry renderer failed");
+    }
     test_probe::pause("build-tree-planned")?;
     if config.dry_run {
         let report = plan.report;
         test_probe::pause("build-tree-report-constructed")?;
         return Ok(report);
     }
-    apply(&config, &plan)?;
+    if telemetry.failed() {
+        bail!("telemetry renderer failed");
+    }
+    apply(&config, &plan, telemetry.as_ref())?;
     let report = plan.report;
+    telemetry.emit(
+        TelemetryEvent::new("build_tree", "tree_applied")
+            .field("links_created", report.links_created)
+            .field("links_replaced", report.links_replaced)
+            .field("stale_links_removed", report.stale_links_removed)
+            .field("directories_created", report.directories_created)
+            .field("directories_pruned", report.directories_pruned),
+    );
     test_probe::pause("build-tree-applied-report-constructed")?;
     Ok(report)
 }
 
-fn plan(config: &BuildTreeConfig) -> Result<Plan> {
+fn plan(config: &BuildTreeConfig, telemetry: &dyn TelemetrySink) -> Result<Plan> {
     let catalog = ReadOnlyCatalog::open_for_materialization(&config.db_path)?;
     let entries = catalog.live_materialization_entries()?;
     let mut desired_by_output: BTreeMap<PathBuf, DesiredLink> = BTreeMap::new();
     let hash_digits = config.hash_digits.get();
 
     for entry in entries {
+        if telemetry.failed() {
+            bail!("telemetry renderer failed");
+        }
         let relative_output =
             output_relative_path(&entry.relative_path, &entry.blob_hash, hash_digits);
         let output_path = config.browse_tree_root.path().join(relative_output);
@@ -88,11 +123,23 @@ fn plan(config: &BuildTreeConfig) -> Result<Plan> {
         desired_by_output.insert(
             output_path.clone(),
             DesiredLink {
-                output_path,
+                output_path: output_path.clone(),
                 target_text,
-                blob_hash: entry.blob_hash,
+                blob_hash: entry.blob_hash.clone(),
             },
         );
+        // Emit when a catalog entry has actually been reconciled into the
+        // desired tree, rather than after the full catalog scan. This keeps
+        // the live dashboard truthful for large trees without an extra scan.
+        telemetry.emit(
+            TelemetryEvent::new("build_tree", "tree_entry_planned")
+                .field("path", crate::integrity::escape_path(&output_path))
+                .field("hash", entry.blob_hash.to_string())
+                .field("dry_run", config.dry_run),
+        );
+        if telemetry.failed() {
+            bail!("telemetry renderer failed");
+        }
     }
 
     let desired_paths: BTreeSet<PathBuf> = desired_by_output.keys().cloned().collect();
@@ -104,6 +151,9 @@ fn plan(config: &BuildTreeConfig) -> Result<Plan> {
     };
 
     for desired in desired_by_output.values() {
+        if telemetry.failed() {
+            bail!("telemetry renderer failed");
+        }
         match fs::symlink_metadata(&desired.output_path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 let parent = desired
@@ -283,19 +333,45 @@ fn would_be_empty_after_cleanup(
     Ok(true)
 }
 
-fn apply(config: &BuildTreeConfig, plan: &Plan) -> Result<()> {
+fn apply(config: &BuildTreeConfig, plan: &Plan, telemetry: &dyn TelemetrySink) -> Result<()> {
     for dir in &plan.directories_to_create {
+        if telemetry.failed() {
+            bail!("telemetry renderer failed");
+        }
         fs::create_dir(dir).wrap_err_with(|| format!("create directory {:?}", dir))?;
+        telemetry.emit(
+            TelemetryEvent::new("build_tree", "tree_directory_applied")
+                .field("path", crate::integrity::escape_path(dir))
+                .field("action", "created"),
+        );
     }
     for link in &plan.desired {
+        if telemetry.failed() {
+            bail!("telemetry renderer failed");
+        }
         apply_desired_link(link)?;
+        telemetry.emit(
+            TelemetryEvent::new("build_tree", "tree_link_applied")
+                .field("path", crate::integrity::escape_path(&link.output_path))
+                .field("hash", link.blob_hash.to_string()),
+        );
     }
     for path in &plan.stale_owned {
+        if telemetry.failed() {
+            bail!("telemetry renderer failed");
+        }
         fs::remove_file(path).wrap_err_with(|| format!("remove stale symlink {:?}", path))?;
     }
     for dir in &plan.directories_to_prune {
+        if telemetry.failed() {
+            bail!("telemetry renderer failed");
+        }
         match fs::remove_dir(dir) {
-            Ok(()) => {}
+            Ok(()) => telemetry.emit(
+                TelemetryEvent::new("build_tree", "tree_directory_applied")
+                    .field("path", crate::integrity::escape_path(dir))
+                    .field("action", "pruned"),
+            ),
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) if error.kind() == ErrorKind::DirectoryNotEmpty => {}
             Err(error) => return Err(error).wrap_err_with(|| format!("prune directory {:?}", dir)),
