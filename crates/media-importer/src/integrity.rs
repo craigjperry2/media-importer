@@ -1,3 +1,4 @@
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use color_eyre::Result;
@@ -59,23 +60,11 @@ pub(crate) fn sort_and_deduplicate(findings: &mut Vec<IntegrityFinding>) {
 }
 
 pub(crate) fn escape_path(path: &Path) -> String {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        escape_bytes(path.as_os_str().as_bytes())
-    }
-    #[cfg(not(unix))]
-    escape_bytes(path.to_string_lossy().as_bytes())
+    escape_bytes(path.as_os_str().as_bytes())
 }
 
 fn path_bytes(path: &Path) -> Vec<u8> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        path.as_os_str().as_bytes().to_vec()
-    }
-    #[cfg(not(unix))]
-    path.to_string_lossy().into_owned().into_bytes()
+    path.as_os_str().as_bytes().to_vec()
 }
 
 fn escape_bytes(bytes: &[u8]) -> String {
@@ -128,7 +117,7 @@ fn push_valid_text(output: &mut String, text: &str) {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn raw_path_identity_escapes_non_utf8_and_control_bytes() {
         use std::ffi::OsStr;

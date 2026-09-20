@@ -227,7 +227,6 @@ impl SourceRelativePath {
             || value
                 .split('/')
                 .any(|part| part.is_empty() || part == "." || part == "..")
-            || looks_like_windows_drive(value)
         {
             bail!("invalid catalog relative path: {value:?}");
         }
@@ -425,11 +424,6 @@ fn validate_real_directory(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn looks_like_windows_drive(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
-}
-
 fn path_components_without_root(path: &Path) -> Result<Vec<String>> {
     let mut parts = Vec::new();
     for component in path.components() {
@@ -531,6 +525,5 @@ mod tests {
         assert!(SourceRelativePath::from_catalog_text("a//b").is_err());
         assert!(SourceRelativePath::from_catalog_text("a/../b").is_err());
         assert!(SourceRelativePath::from_catalog_text("a\\b").is_err());
-        assert!(SourceRelativePath::from_catalog_text("C:/a").is_err());
     }
 }

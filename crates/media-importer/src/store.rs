@@ -1,18 +1,17 @@
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
+use std::ffi::{CStr, OsStr};
 use std::fs::{self, File, OpenOptions};
 use std::io::ErrorKind;
 use std::num::NonZeroUsize;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::Path;
 
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, bail, eyre};
 use tracing::debug;
 
-use crate::hashing::{
-    hash_file, hash_file_with_chunk_observer, hash_reader_to_writer_with_chunk_observer,
-};
+use crate::hashing::{hash_reader_to_writer_with_chunk_observer, hash_reader_with_chunk_observer};
 use crate::integrity::{IntegrityFinding, push_finding};
 use crate::paths::{BlobHash, StagingFileName, StoreRoot};
 
@@ -63,9 +62,9 @@ pub struct OpenedBlob {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlobFileIdentity {
     pub len: u64,
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     device: u64,
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     inode: u64,
 }
 
@@ -74,12 +73,10 @@ impl Store {
         Self { root }
     }
 
-    pub fn prepare_for_import(&self) -> Result<()> {
-        fs::create_dir_all(self.root.blobs_dir())
-            .wrap_err_with(|| format!("create blobs directory {:?}", self.root.blobs_dir()))?;
-        fs::create_dir_all(self.root.staging_dir())
-            .wrap_err_with(|| format!("create staging directory {:?}", self.root.staging_dir()))?;
-        self.purge_staging()
+    pub fn prepare_staging_for_import(&self) -> Result<()> {
+        let _ = open_validated_staging_directory(&self.root, true)?;
+        self.purge_existing_staging()?;
+        ensure_blob_parent(&self.root, None)
     }
 
     pub fn ingest_file(
@@ -101,21 +98,34 @@ impl Store {
         source_path: &Path,
         expected_size: u64,
         chunk_size: NonZeroUsize,
-        on_chunk_written: impl FnMut(u64) -> Result<()>,
+        mut on_chunk_written: impl FnMut(u64) -> Result<()>,
     ) -> Result<StoredBlob> {
-        let before = fs::metadata(source_path)
+        let before = fs::symlink_metadata(source_path)
             .wrap_err_with(|| format!("stat source file before import {:?}", source_path))?;
+        if !before.is_file() {
+            bail!("source file is not a regular file: {source_path:?}");
+        }
+        let before_identity = BlobFileIdentity::from_metadata(&before);
         let before_mtime = before.modified().ok();
         let staging_name = StagingFileName::new();
         let staging_path = self.root.staging_path(&staging_name);
 
-        let mut source = File::open(source_path)
+        let mut source = open_regular_no_follow(source_path)
             .wrap_err_with(|| format!("open source file for import {:?}", source_path))?;
+        if BlobFileIdentity::from_metadata(
+            &source
+                .metadata()
+                .wrap_err_with(|| format!("read opened source metadata {source_path:?}"))?,
+        ) != before_identity
+        {
+            bail!("source file changed before its no-follow handle was opened: {source_path:?}");
+        }
         let mut staging = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&staging_path)
             .wrap_err_with(|| format!("create staging file {:?}", staging_path))?;
+        crate::test_probe::pause_or_fail("store-after-staging-created")?;
         // From this point on every early return, including metadata checks and
         // an existing-blob verification failure, removes the private staging
         // path.  Successful installs remove it explicitly before returning.
@@ -125,7 +135,12 @@ impl Store {
             &mut source,
             &mut staging,
             chunk_size,
-            on_chunk_written,
+            |size_bytes| {
+                // This seam is inside the one-pass source-to-staging loop: a
+                // failure here leaves only a private staging artifact.
+                crate::test_probe::pause_or_fail("store-during-source-copy")?;
+                on_chunk_written(size_bytes)
+            },
         ) {
             Ok(result) => result,
             Err(error) => {
@@ -134,7 +149,6 @@ impl Store {
                     .wrap_err_with(|| format!("stream source into staging {:?}", source_path));
             }
         };
-        drop(staging);
         if hash_result.size_bytes != expected_size {
             remove_staging_best_effort(&staging_path);
             bail!(
@@ -145,16 +159,12 @@ impl Store {
             );
         }
 
-        let after = fs::metadata(source_path)
-            .wrap_err_with(|| format!("stat source file after import {:?}", source_path))?;
-        if after.len() != expected_size {
+        let after = source.metadata().wrap_err_with(|| {
+            format!("read source handle metadata after import {source_path:?}")
+        })?;
+        if !after.is_file() || BlobFileIdentity::from_metadata(&after) != before_identity {
             remove_staging_best_effort(&staging_path);
-            bail!(
-                "source file size changed during import {:?}: expected {}, now {}",
-                source_path,
-                expected_size,
-                after.len()
-            );
+            bail!("source file changed during import {source_path:?}");
         }
         if let (Some(before), Ok(after)) = (before_mtime, after.modified())
             && before != after
@@ -163,13 +173,20 @@ impl Store {
             bail!("source file modified during import {:?}", source_path);
         }
 
+        // Set the final blob mode while this is still our private staging
+        // handle. `hard_link` preserves inode permissions, so the CAS name is
+        // never observable with a writable mode, even if the process crashes
+        // immediately after installation.
+        set_readonly_blob(&staging)
+            .wrap_err_with(|| format!("make staged blob read-only {:?}", staging_path))?;
+        drop(staging);
+
         let final_path = self.root.blob_path(&hash_result.hash);
-        if let Some(parent) = final_path.parent()
-            && let Err(error) = fs::create_dir_all(parent)
-        {
+        if let Err(error) = ensure_blob_parent(&self.root, Some(&hash_result.hash)) {
             remove_staging_best_effort(&staging_path);
-            return Err(error)
-                .wrap_err_with(|| format!("create blob parent directory {:?}", parent));
+            return Err(error).wrap_err_with(|| {
+                format!("create blob parent directory for {}", hash_result.hash)
+            });
         }
 
         // Private integration-test seam: a deterministic barrier immediately
@@ -185,8 +202,6 @@ impl Store {
                         format!("remove installed staging file {:?}", staging_path)
                     });
                 }
-                set_readonly_blob(&final_path)
-                    .wrap_err_with(|| format!("make blob read-only {:?}", final_path))?;
                 Ok(StoredBlob {
                     hash: hash_result.hash,
                     size_bytes: hash_result.size_bytes,
@@ -194,9 +209,11 @@ impl Store {
                 })
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                verify_existing_blob(&final_path, hash_result.size_bytes)?;
-                set_readonly_blob(&final_path)
-                    .wrap_err_with(|| format!("make existing blob read-only {:?}", final_path))?;
+                // Test-only seam for the final-path replacement regression.
+                // Production behavior is unchanged unless the private probe
+                // environment is configured.
+                crate::test_probe::pause_or_fail("store-before-existing-cas-open")?;
+                verify_and_make_existing_blob_readonly(&final_path, hash_result.size_bytes)?;
                 if let Err(error) = fs::remove_file(&staging_path) {
                     remove_staging_best_effort(&staging_path);
                     return Err(error).wrap_err_with(|| {
@@ -223,11 +240,11 @@ impl Store {
 
     pub fn check_blob_presence(&self, hash: &BlobHash, size_bytes: u64) -> Result<BlobPresence> {
         let path = self.root.blob_path(hash);
-        if !path.exists() {
-            return Ok(BlobPresence::Missing);
+        match verify_existing_blob(&path, size_bytes) {
+            Ok(()) => Ok(BlobPresence::Present),
+            Err(error) if is_not_found_error(&error) => Ok(BlobPresence::Missing),
+            Err(error) => Err(error),
         }
-        verify_existing_blob(&path, size_bytes)?;
-        Ok(BlobPresence::Present)
     }
 
     /// Check a cataloged CAS entry without following the final path component
@@ -265,7 +282,9 @@ impl Store {
         source_path: &Path,
         chunk_size: NonZeroUsize,
     ) -> Result<StoredBlob> {
-        let hash_result = hash_file(source_path, chunk_size)?;
+        let mut source = open_regular_no_follow(source_path)
+            .wrap_err_with(|| format!("open source file for read-only hashing {source_path:?}"))?;
+        let hash_result = hash_reader_with_chunk_observer(&mut source, chunk_size, |_| Ok(()))?;
         let presence = self.check_blob_presence(&hash_result.hash, hash_result.size_bytes)?;
         let outcome = match presence {
             BlobPresence::Missing => StoreOutcome::Created,
@@ -284,7 +303,9 @@ impl Store {
         chunk_size: NonZeroUsize,
         on_chunk_read: impl FnMut(u64) -> Result<()>,
     ) -> Result<StoredBlob> {
-        let hash_result = hash_file_with_chunk_observer(source_path, chunk_size, on_chunk_read)?;
+        let mut source = open_regular_no_follow(source_path)
+            .wrap_err_with(|| format!("open source file for read-only hashing {source_path:?}"))?;
+        let hash_result = hash_reader_with_chunk_observer(&mut source, chunk_size, on_chunk_read)?;
         let outcome = match self.check_blob_presence(&hash_result.hash, hash_result.size_bytes)? {
             BlobPresence::Missing => StoreOutcome::Created,
             BlobPresence::Present => StoreOutcome::Reused,
@@ -296,25 +317,18 @@ impl Store {
         })
     }
 
-    fn purge_staging(&self) -> Result<()> {
-        for entry in fs::read_dir(self.root.staging_dir())
-            .wrap_err_with(|| format!("read staging directory {:?}", self.root.staging_dir()))?
-        {
-            let entry = entry
-                .wrap_err_with(|| format!("read staging entry {:?}", self.root.staging_dir()))?;
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .wrap_err_with(|| format!("read staging entry type {:?}", path))?;
-            if file_type.is_dir() {
-                fs::remove_dir_all(&path)
-                    .wrap_err_with(|| format!("remove stale staging directory {:?}", path))?;
-            } else {
-                fs::remove_file(&path)
-                    .wrap_err_with(|| format!("remove stale staging file {:?}", path))?;
-            }
-        }
-        Ok(())
+    /// Remove entries which already exist in the application-owned staging
+    /// directory. Missing staging is intentionally an empty state.
+    pub fn purge_existing_staging(&self) -> Result<()> {
+        let Some(directory) = open_validated_staging_directory(&self.root, false)? else {
+            return Ok(());
+        };
+        purge_directory_entries(&directory).wrap_err_with(|| {
+            format!(
+                "purge stale staging directory {:?}",
+                self.root.staging_dir()
+            )
+        })
     }
 }
 
@@ -420,7 +434,7 @@ pub fn sync_nearest_existing_blob_parent(root: &StoreRoot, hash: &BlobHash) -> R
 
 impl BlobFileIdentity {
     fn from_metadata(metadata: &fs::Metadata) -> Self {
-        #[cfg(unix)]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             use std::os::unix::fs::MetadataExt;
             Self {
@@ -428,10 +442,6 @@ impl BlobFileIdentity {
                 device: metadata.dev(),
                 inode: metadata.ino(),
             }
-        }
-        #[cfg(not(unix))]
-        Self {
-            len: metadata.len(),
         }
     }
 }
@@ -605,45 +615,232 @@ fn valid_shard(value: &OsStr) -> bool {
     })
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn compare_os_str(left: &OsStr, right: &OsStr) -> Ordering {
     use std::os::unix::ffi::OsStrExt;
     left.as_bytes().cmp(right.as_bytes())
 }
 
-#[cfg(not(unix))]
-fn compare_os_str(left: &OsStr, right: &OsStr) -> Ordering {
-    left.to_string_lossy()
-        .as_bytes()
-        .cmp(right.to_string_lossy().as_bytes())
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn safe_open(path: &Path) -> std::io::Result<File> {
+    open_regular_no_follow(path)
 }
 
-#[cfg(unix)]
-fn safe_open(path: &Path) -> std::io::Result<File> {
+/// Open a regular file without following its final path component. Parent
+/// directories are separately validated at store-owned CAS boundaries.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_regular_no_follow(path: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
 }
 
-#[cfg(not(unix))]
-fn safe_open(path: &Path) -> std::io::Result<File> {
-    File::open(path)
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_no_follow(path: &Path, flags: libc::c_int) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(flags | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    File::open(path)?.sync_all()
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_validated_staging_directory(root: &StoreRoot, create: bool) -> Result<Option<File>> {
+    match fs::symlink_metadata(root.staging_dir()) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!(
+                "staging directory must not be a symlink: {:?}",
+                root.staging_dir()
+            );
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            bail!("staging path is not a directory: {:?}", root.staging_dir());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound && create => {
+            fs::create_dir(root.staging_dir())
+                .wrap_err_with(|| format!("create staging directory {:?}", root.staging_dir()))?;
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .wrap_err_with(|| format!("stat staging directory {:?}", root.staging_dir()));
+        }
+    }
+    let directory = open_no_follow(&root.staging_dir(), libc::O_DIRECTORY).wrap_err_with(|| {
+        format!(
+            "open staging directory without following links {:?}",
+            root.staging_dir()
+        )
+    })?;
+    if !directory.metadata()?.is_dir() {
+        bail!("staging path is not a directory: {:?}", root.staging_dir());
+    }
+    Ok(Some(directory))
 }
 
-#[cfg(not(unix))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ensure_blob_parent(root: &StoreRoot, hash: Option<&BlobHash>) -> Result<()> {
+    let mut current = root.path().to_path_buf();
+    for component in std::iter::once("blobs").chain(
+        hash.into_iter()
+            .flat_map(|hash| [&hash.as_str()[0..2], &hash.as_str()[2..4]]),
+    ) {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                bail!("CAS directory must not be a symlink: {current:?}")
+            }
+            Ok(metadata) if !metadata.is_dir() => bail!("CAS path is not a directory: {current:?}"),
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                if let Err(error) = fs::create_dir(&current)
+                    && error.kind() != ErrorKind::AlreadyExists
+                {
+                    return Err(error)
+                        .wrap_err_with(|| format!("create CAS directory {current:?}"));
+                }
+            }
+            Err(error) => {
+                return Err(error).wrap_err_with(|| format!("stat CAS directory {current:?}"));
+            }
+        }
+        open_no_follow(&current, libc::O_DIRECTORY)
+            .wrap_err_with(|| format!("open CAS directory without following links {current:?}"))?;
+    }
+    Ok(())
+}
+
+/// Purge through an already-open directory descriptor. Every lookup and
+/// deletion is relative to that descriptor, so a concurrent replacement of
+/// the `staging` pathname cannot redirect cleanup outside the validated root.
+fn purge_directory_entries(directory: &File) -> Result<()> {
+    let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error()).wrap_err("duplicate staging directory handle");
+    }
+    let stream = unsafe { libc::fdopendir(duplicate) };
+    if stream.is_null() {
+        unsafe { libc::close(duplicate) };
+        return Err(std::io::Error::last_os_error()).wrap_err("open staging directory stream");
+    }
+    let result = (|| {
+        loop {
+            clear_errno();
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(0) {
+                    break;
+                }
+                return Err(error).wrap_err("enumerate staging directory handle");
+            }
+            let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            if matches!(name.to_bytes(), b"." | b"..") {
+                continue;
+            }
+            purge_directory_entry(directory.as_raw_fd(), name)?;
+        }
+        Ok(())
+    })();
+    unsafe { libc::closedir(stream) };
+    result
+}
+
+#[cfg(target_os = "linux")]
+fn clear_errno() {
+    unsafe { *libc::__errno_location() = 0 };
+}
+
+#[cfg(target_os = "macos")]
+fn clear_errno() {
+    unsafe { *libc::__error() = 0 };
+}
+
+fn purge_directory_entry(parent_fd: libc::c_int, name: &CStr) -> Result<()> {
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let stat_result = unsafe {
+        libc::fstatat(
+            parent_fd,
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if stat_result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == ErrorKind::NotFound {
+            return Ok(());
+        }
+        return Err(error).wrap_err("stat stale staging entry without following links");
+    }
+    let stat = unsafe { stat.assume_init() };
+    if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+        let child_fd = unsafe {
+            libc::openat(
+                parent_fd,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if child_fd >= 0 {
+            let child = unsafe { File::from_raw_fd(child_fd) };
+            purge_directory_entries(&child)?;
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != ErrorKind::NotFound {
+                return Err(error).wrap_err("open stale staging directory without following links");
+            }
+        }
+        unlinkat(parent_fd, name, libc::AT_REMOVEDIR)
+    } else {
+        unlinkat(parent_fd, name, 0)
+    }
+}
+
+fn unlinkat(parent_fd: libc::c_int, name: &CStr, flags: libc::c_int) -> Result<()> {
+    if unsafe { libc::unlinkat(parent_fd, name.as_ptr(), flags) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == ErrorKind::NotFound {
+        Ok(())
+    } else {
+        Err(error).wrap_err("remove stale staging entry relative to validated directory")
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sync_directory(path: &Path) -> std::io::Result<()> {
     File::open(path)?.sync_all()
 }
 
 fn verify_existing_blob(path: &Path, expected_size: u64) -> Result<()> {
-    let metadata = fs::metadata(path).wrap_err_with(|| format!("stat existing blob {:?}", path))?;
+    let file = open_regular_no_follow(path)
+        .wrap_err_with(|| format!("open existing blob without following links {path:?}"))?;
+    verify_opened_blob(&file, path, expected_size)
+}
+
+/// Verify and harden an already-installed blob through one no-follow file
+/// descriptor. In particular, do not re-resolve `path` between verification
+/// and chmod: an attacker replacing that name with a symlink must not cause
+/// the target to be permission-mutated.
+fn verify_and_make_existing_blob_readonly(path: &Path, expected_size: u64) -> Result<()> {
+    let file = open_regular_no_follow(path)
+        .wrap_err_with(|| format!("open existing blob without following links {path:?}"))?;
+    verify_opened_blob(&file, path, expected_size)?;
+    set_readonly_blob(&file).wrap_err_with(|| format!("make existing blob read-only {path:?}"))
+}
+
+fn verify_opened_blob(file: &File, path: &Path, expected_size: u64) -> Result<()> {
+    let metadata = file
+        .metadata()
+        .wrap_err_with(|| format!("stat opened existing blob {path:?}"))?;
+    if !metadata.is_file() {
+        bail!("CAS blob is not a regular file: {path:?}");
+    }
     if metadata.len() != expected_size {
         bail!(
             "CAS blob exists with unexpected size: {:?}, expected {}, found {}",
@@ -653,6 +850,13 @@ fn verify_existing_blob(path: &Path, expected_size: u64) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn is_not_found_error(error: &color_eyre::Report) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|cause| cause.kind() == ErrorKind::NotFound)
 }
 
 fn remove_staging_best_effort(path: &Path) {
@@ -683,20 +887,12 @@ impl Drop for StagingCleanup<'_> {
     }
 }
 
-#[cfg(unix)]
-fn set_readonly_blob(path: &Path) -> Result<()> {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn set_readonly_blob(file: &File) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let permissions = fs::Permissions::from_mode(0o444);
-    fs::set_permissions(path, permissions)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_readonly_blob(path: &Path) -> Result<()> {
-    let mut permissions = fs::metadata(path)?.permissions();
-    permissions.set_readonly(true);
-    fs::set_permissions(path, permissions)?;
+    file.set_permissions(permissions)?;
     Ok(())
 }
 
@@ -752,7 +948,7 @@ mod tests {
         fs::create_dir(&store_path).expect("store root");
         let root = StoreRoot::validate(&store_path).expect("validated store root");
         let store = Store::new(root.clone());
-        store.prepare_for_import().expect("prepared store");
+        store.prepare_staging_for_import().expect("prepared store");
 
         let source = temp.path().join("source.bin");
         fs::write(&source, b"expected source bytes").expect("source fixture");
@@ -773,5 +969,27 @@ mod tests {
             0,
             "verification failure must not leave staging artifacts"
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn purging_staging_removes_a_symlink_without_following_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().expect("temporary directory");
+        let store_path = temp.path().join("store");
+        fs::create_dir(&store_path).expect("store root");
+        let root = StoreRoot::validate(&store_path).expect("validated store root");
+        let store = Store::new(root.clone());
+        fs::create_dir(root.staging_dir()).expect("staging directory");
+        let outside = temp.path().join("outside");
+        fs::write(&outside, b"must survive").expect("outside fixture");
+        let link = root.staging_dir().join("escaping-link");
+        symlink(&outside, &link).expect("staging symlink");
+
+        store.purge_existing_staging().expect("purge staging");
+
+        assert!(!link.exists(), "staging link itself is removed");
+        assert_eq!(fs::read(&outside).expect("outside target"), b"must survive");
     }
 }

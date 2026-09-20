@@ -613,20 +613,11 @@ Milestone 5 does not include:
 - TTY progress dashboards; or
 - Windows support.
 
-## Future Milestones
+## Later Scope
 
-The planned spec-convergence sequence is now documented:
-
-1. `IMPLEMENTATION-MILESTONE6.md`: metadata-fast idempotent import;
-2. `IMPLEMENTATION-MILESTONE7.md`: single catalog writer, batching, and managed
-   passive WAL checkpoints;
-3. `IMPLEMENTATION-MILESTONE8.md`: bounded mount-aware parallel ingestion;
-4. `IMPLEMENTATION-MILESTONE9.md`: semantic blob relationships and
-   relationship-aware reachability;
-5. `IMPLEMENTATION-MILESTONE10.md`: TTY dashboards and structured non-TTY
-   output; and
-6. `IMPLEMENTATION-MILESTONE11.md`: staging recovery, architecture/platform
-   conformance, and extended I/O/fault verification.
+Milestones 6 through 8 and 10 through 11 are implemented. Semantic blob
+relationships and relationship-aware reachability remain explicitly deferred;
+they are not implied by this completed historical lock-design guide.
 
 Potential post-spec work remains intentionally unplanned: explicit source-record
 management, repair/quarantine, configurable retention, browse-tree audit, and

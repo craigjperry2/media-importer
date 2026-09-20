@@ -70,7 +70,7 @@ impl StoreRunLock {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn open_store_directory(path: &std::path::Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -78,9 +78,4 @@ fn open_store_directory(path: &std::path::Path) -> std::io::Result<File> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
-}
-
-#[cfg(not(unix))]
-fn open_store_directory(path: &std::path::Path) -> std::io::Result<File> {
-    File::open(path)
 }

@@ -15,12 +15,12 @@ use crate::catalog::{
     CatalogWriterHandle, Clock, GcWriteSession, SystemClock, inspect_catalog_for_gc_dry_run,
 };
 use crate::config::GcConfig;
-use crate::hashing::hash_open_file_with_chunk_observer;
+use crate::hashing::hash_reader_with_chunk_observer;
 use crate::integrity::{IntegrityFinding, push_finding, sort_and_deduplicate};
 use crate::paths::BlobHash;
 use crate::run_lock::{LockMode, StoreRunLock};
 use crate::store::{
-    BlobFileIdentity, inspect_cas, open_blob_no_follow, remove_blob_file,
+    BlobFileIdentity, Store, inspect_cas, open_blob_no_follow, remove_blob_file,
     revalidate_blob_for_removal, sync_blob_parent, sync_nearest_existing_blob_parent,
 };
 use crate::telemetry::{NoopTelemetrySink, TelemetryEvent, TelemetrySink};
@@ -351,6 +351,9 @@ fn collect_garbage_with_dependencies_and_telemetry(
         LockMode::Exclusive
     };
     let _lock = StoreRunLock::acquire(&config.store_root, "gc", mode)?;
+    if !config.dry_run {
+        Store::new(config.store_root.clone()).purge_existing_staging()?;
+    }
     let outcome = if config.dry_run {
         collect_dry_run(config, telemetry.as_ref())
     } else {
@@ -676,7 +679,7 @@ fn run_preflight(
             let display = display_path(config, &path);
             let mut identity = None;
             match open_blob_no_follow(&config.store_root, &blob.hash) {
-                Ok(mut opened) => match hash_open_file_with_chunk_observer(
+                Ok(mut opened) => match hash_reader_with_chunk_observer(
                     &mut opened.file,
                     config.chunk_size,
                     |_| check_telemetry(telemetry),
@@ -991,6 +994,12 @@ fn apply_plan(
                     .expect("present sweep candidates have checked physical progress")
                     .assign_to(&mut preflight.report);
                 sweep_mutations_started = true;
+                // This is the crash-recovery boundary where the CAS mutation
+                // is durable but its matching catalog sweep is still only
+                // staged in the writer transaction.  Keep it immediately
+                // after the unlink (and before `stage_sweep`) so the
+                // subprocess qualification exercises the documented state.
+                test_probe::pause_or_fail("gc-after-unlink-before-sweep-commit")?;
                 if let Err(error) = mutator.sync_present_parent(&config, &candidate.blob.hash) {
                     return Ok(commit_partial(
                         transaction,

@@ -6,7 +6,7 @@ use color_eyre::eyre::{WrapErr, eyre};
 
 use crate::catalog::inspect_catalog_for_audit;
 use crate::config::AuditConfig;
-use crate::hashing::hash_open_file_with_chunk_observer;
+use crate::hashing::hash_reader_with_chunk_observer;
 use crate::integrity::{IntegrityFinding, push_finding, sort_and_deduplicate};
 use crate::run_lock::{LockMode, StoreRunLock};
 use crate::store::{inspect_cas, open_blob_no_follow};
@@ -118,65 +118,63 @@ pub fn audit_store_with_telemetry(
         }
 
         match open_blob_no_follow(&config.store_root, &hash) {
-            Ok(mut opened) => match hash_open_file_with_chunk_observer(
-                &mut opened.file,
-                config.chunk_size,
-                |_| {
+            Ok(mut opened) => {
+                match hash_reader_with_chunk_observer(&mut opened.file, config.chunk_size, |_| {
                     if telemetry.failed() {
                         Err(eyre!("telemetry renderer failed"))
                     } else {
                         Ok(())
                     }
-                },
-            ) {
-                Ok(actual) => {
-                    blobs_hashed = blobs_hashed
-                        .checked_add(1)
-                        .ok_or_else(|| eyre!("hashed blob counter overflow"))?;
-                    telemetry.emit(
-                        TelemetryEvent::new("audit", "blob_hashed")
-                            .field("hash", hash.to_string())
-                            .field("bytes_read", actual.size_bytes),
-                    );
-                    let expected_size = catalog
-                        .map(|blob| blob.size_bytes)
-                        .unwrap_or(opened.identity.len);
-                    if expected_size != actual.size_bytes
-                        || opened.identity.len != actual.size_bytes
-                    {
-                        push_finding(
-                            &mut findings,
-                            AuditFinding::new(
-                                "SIZE_MISMATCH",
-                                hash.to_string(),
-                                format!(
-                                    "expected={} metadata={} actual={}",
-                                    expected_size, opened.identity.len, actual.size_bytes
+                }) {
+                    Ok(actual) => {
+                        blobs_hashed = blobs_hashed
+                            .checked_add(1)
+                            .ok_or_else(|| eyre!("hashed blob counter overflow"))?;
+                        telemetry.emit(
+                            TelemetryEvent::new("audit", "blob_hashed")
+                                .field("hash", hash.to_string())
+                                .field("bytes_read", actual.size_bytes),
+                        );
+                        let expected_size = catalog
+                            .map(|blob| blob.size_bytes)
+                            .unwrap_or(opened.identity.len);
+                        if expected_size != actual.size_bytes
+                            || opened.identity.len != actual.size_bytes
+                        {
+                            push_finding(
+                                &mut findings,
+                                AuditFinding::new(
+                                    "SIZE_MISMATCH",
+                                    hash.to_string(),
+                                    format!(
+                                        "expected={} metadata={} actual={}",
+                                        expected_size, opened.identity.len, actual.size_bytes
+                                    ),
                                 ),
-                            ),
-                        )?;
+                            )?;
+                        }
+                        if actual.hash != hash {
+                            push_finding(
+                                &mut findings,
+                                AuditFinding::new(
+                                    "HASH_MISMATCH",
+                                    hash.to_string(),
+                                    format!("expected={hash} actual={}", actual.hash),
+                                ),
+                            )?;
+                        }
                     }
-                    if actual.hash != hash {
-                        push_finding(
-                            &mut findings,
-                            AuditFinding::new(
-                                "HASH_MISMATCH",
-                                hash.to_string(),
-                                format!("expected={hash} actual={}", actual.hash),
-                            ),
-                        )?;
-                    }
+                    Err(error) if telemetry.failed() => return Err(error),
+                    Err(_) => push_finding(
+                        &mut findings,
+                        AuditFinding::new(
+                            "BLOB_IO_ERROR",
+                            hash.to_string(),
+                            format!("path={display} reason=read-failed"),
+                        ),
+                    )?,
                 }
-                Err(error) if telemetry.failed() => return Err(error),
-                Err(_) => push_finding(
-                    &mut findings,
-                    AuditFinding::new(
-                        "BLOB_IO_ERROR",
-                        hash.to_string(),
-                        format!("path={display} reason=read-failed"),
-                    ),
-                )?,
-            },
+            }
             Err(_) => push_finding(
                 &mut findings,
                 AuditFinding::new(

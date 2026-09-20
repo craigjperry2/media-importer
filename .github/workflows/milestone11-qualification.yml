@@ -1,0 +1,22 @@
+name: Milestone 11 qualification
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  qualification:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v20
+      - run: nix develop --command cargo fmt --all --check
+      - run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
+      - run: nix develop --command cargo test --workspace
+      - run: nix develop --command cargo test --workspace --test milestone11_extended -- --ignored
+      - run: nix develop --command prek run --all-files

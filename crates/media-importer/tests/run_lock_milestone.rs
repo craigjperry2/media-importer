@@ -125,7 +125,7 @@ fn replaced_regular_file_and_symlink_fail_acquisition_with_context_before_audit_
     assert!(rendered.contains(&fixture.store.display().to_string()));
     assert!(rendered.contains("not a directory"));
     fs::remove_file(&fixture.store).expect("remove replacement file");
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         std::os::unix::fs::symlink(&original, &fixture.store).expect("replace store with symlink");
         let error = audit_store(config).expect_err("symlink must not be followed");
@@ -423,7 +423,7 @@ fn racing_new_store_imports_serialize_to_one_valid_catalog() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn import_accepts_a_store_symlink_alias_and_coordinates_on_its_target_inode() {
     let fixture = CommandFixture::new();

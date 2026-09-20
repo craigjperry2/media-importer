@@ -109,6 +109,26 @@ example mount identity extraction or no-follow directory opening.
 
 ## Spec Conformance Matrix
 
+| SPEC.md requirement | Implementation boundary | Behavior-level evidence |
+| --- | --- | --- |
+| Metadata-fast repeated import | `ingest` metadata lookup and `store` CAS metadata check | `tests/import_milestone.rs::repeat_real_import_observer_reports_metadata_skip_without_worker_lifecycle` |
+| One-pass source read (one application read/hash/write pass; this does not assert physical page-cache bypass) | store staging stream and ingest telemetry | `ingest::tests::exact_one_pass_read_events_are_emitted_before_post_read_failure_and_staging_is_cleaned` |
+| BLAKE3 and two-level shards | `hashing::BlobHasher`, `paths::BlobHash`, `store` | `tests/import_milestone.rs::real_import_creates_cas_and_catalog_then_rerun_reuses_blobs` |
+| SQLite blob/source integrity (semantic relationships deferred) | `catalog` schema and audit snapshot | `tests/gc_milestone.rs::catalog_foreign_key_and_domain_findings_block_all_gc_mutation` |
+| Mark-and-sweep and offline materialization | `gc`, `materialize` | `tests/gc_milestone.rs::two_real_runs_mark_then_sweep_without_a_time_delay` and `tests/import_milestone.rs::build_tree_creates_relative_symlinks_and_rerun_is_unchanged` |
+| Mount-aware configurable workers | `scanner` mount IDs and ingest scheduler | `ingest::tests::default_configuration_and_configured_n_are_enforced_per_injected_mount` |
+| Staging install/order/cleanup | `store` staging/CAS boundary | `tests/import_milestone.rs::real_import_creates_cas_and_catalog_then_rerun_reuses_blobs` |
+| WAL/NORMAL, single writer, batching, passive checkpoints | `catalog::CatalogWriterHandle` | `tests/telemetry_milestone.rs::import_jsonl_reconciles_real_staging_dry_run_and_writer_shutdown_checkpoint` |
+| Four-command CLI | `cli` and `main` dispatch | `tests/audit_milestone.rs::help_exposes_all_milestone_four_commands` |
+| TTY and non-TTY reporting | `telemetry` renderers | `tests/telemetry_milestone.rs::captured_stdout_uses_independently_parseable_json_lines_with_a_summary` |
+| Functional boundaries and immutable 0444 blobs | `hashing` core and `store` permissions | `hashing::tests::synthetic_reader_is_hashed_without_filesystem_access` and `tests/import_milestone.rs::real_import_creates_cas_and_catalog_then_rerun_reuses_blobs` |
+| Integration-first and probe-based testing | subprocess probes and behavior reports | `tests/run_lock_milestone.rs::source_worker_failure_cancels_joins_releases_lock_and_allows_clean_rerun` |
+
+The matrix evidence is qualified to Linux and macOS, the only supported targets.
+“One pass” means one application-level sequential source stream into the BLAKE3
+hasher and staging writer. It deliberately makes no claim about physical device
+reads or page-cache residency; the probes measure bytes delivered to that stream.
+
 Add a maintained table to this document or a nearby authoritative Rust rewrite
 document mapping every `SPEC.md` requirement to implementation and tests. At
 minimum cover:
@@ -150,6 +170,17 @@ Required scenarios:
 - JSON Lines remains parseable and the terminal renderer remains responsive
   under sustained events.
 
+The ignored release-qualification target is
+`tests/milestone11_extended.rs`: `m11_extended_many_records_checkpoints_and_sustained_rendering`
+generates 384 records (crossing multiple default batches), observes periodic
+checkpoint request/completion telemetry and the final checkpoint count, records
+the WAL sidecar size, parses complete JSON Lines, and drives the human renderer
+through a real PTY. Exact scheduler concurrency and queue high-water bounds are
+measured in the deterministic normal probe
+`ingest::tests::parallel_same_content_deduplicates_and_queue_high_water_never_exceeds_documented_bounds`.
+These tests measure application-visible stream and WAL facts, never physical
+page-cache residency or device reads.
+
 Do not assert that an 8TB fixture completes in a literal number of minutes in
 CI. The acceptance proof is zero unchanged content bytes plus bounded metadata
 work; optional operator benchmarks may record elapsed time.
@@ -169,6 +200,14 @@ observable boundaries:
 - during GC after unlink and before catalog sweep commit;
 - during build-tree replacement; and
 - during reporting shutdown/broken pipe.
+
+`tests/milestone11_extended.rs::m11_extended_io_and_exact_import_fault_campaign`
+exercises every import boundary. Its sibling
+`tests/milestone11_extended.rs::m11_extended_gc_build_tree_and_reporting_fault_boundaries`
+exercises the post-unlink/pre-sweep-commit GC seam, the actual temporary-link
+before-rename build-tree seam, and a real closed JSONL pipe. Each captures the
+immediately durable staging/CAS/catalog/WAL state before audit and a dry run,
+then verifies the allowed recovery and final audit.
 
 For every boundary, specify and test the durable state allowed immediately after
 failure and the recovery behavior of the next appropriate real command. Verify:
@@ -230,7 +269,7 @@ Update README and authoritative Rust docs to state:
 - unchanged-import metadata fidelity and opt-out behavior;
 - mount-worker tuning and the one-pass/page-cache interpretation;
 - writer batching/checkpoint behavior;
-- relationship-aware GC reachability;
+- semantic relationship support and relationship-aware GC reachability are deferred and are not Milestone 11 acceptance claims;
 - TTY versus JSON Lines output;
 - which commands purge staging and why read-only commands do not; and
 - how to run the extended conformance/fault campaign.
@@ -264,7 +303,8 @@ measure.
 
 ## Definition Of Done
 
-Milestone 11 is complete when every `SPEC.md` requirement has an evidence-backed
+Milestone 11 is complete when every applicable Milestone 11 `SPEC.md` requirement
+other than deferred semantic relationship support has an evidence-backed
 conformance-matrix entry, exclusive commands safely recover stale staging,
 read-only commands remain mutation-free, hashing core no longer opens files,
 unsupported platforms fail intentionally, the extended I/O/fault campaign

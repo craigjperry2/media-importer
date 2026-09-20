@@ -113,6 +113,23 @@ fn audit_without_wal_does_not_create_sidecars_or_change_durable_files() {
 }
 
 #[test]
+fn audit_preserves_staging_bytes_and_metadata_exactly() {
+    let temp = TempDir::new().unwrap();
+    import(&temp);
+    let staging = temp.child("store/staging/stale.tmp");
+    staging.write_binary(b"stale audit evidence").unwrap();
+    let before = snapshot(staging.path());
+
+    audit(&temp).success();
+
+    assert_eq!(
+        snapshot(staging.path()),
+        before,
+        "audit has no staging repair authority"
+    );
+}
+
+#[test]
 fn immutable_uri_percent_encodes_explicit_catalog_paths() {
     let temp = TempDir::new().unwrap();
     import(&temp);
@@ -187,7 +204,7 @@ fn audit_rejects_nonregular_wal_but_ignores_source_shm_without_mutating_it() {
     assert!(Path::new(&sidecar).is_dir());
     assert_eq!(before, fs::metadata(&sidecar).unwrap().modified().unwrap());
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let temp = TempDir::new().unwrap();
         import(&temp);
@@ -347,7 +364,7 @@ fn orphan_corruption_and_invalid_cas_layout_are_reported_once_and_separately() {
         .stdout(predicate::str::contains("Blobs hashed: 2"));
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn symlinks_and_non_utf8_cas_names_are_not_followed_and_are_escaped() {
     use std::ffi::OsStr;

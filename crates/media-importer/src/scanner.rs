@@ -1,6 +1,6 @@
 use std::fmt;
 use std::fs;
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -105,14 +105,9 @@ impl Iterator for SourceScanner {
 }
 
 fn mount_id(metadata: &fs::Metadata) -> MountId {
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         MountId(metadata.dev())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        MountId(0)
     }
 }
 

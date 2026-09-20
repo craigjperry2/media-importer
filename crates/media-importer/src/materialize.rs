@@ -11,6 +11,7 @@ use crate::catalog::ReadOnlyCatalog;
 use crate::config::BuildTreeConfig;
 use crate::paths::{BlobHash, output_relative_path, points_inside_blobs, relative_symlink_target};
 use crate::run_lock::{LockMode, StoreRunLock};
+use crate::store::Store;
 use crate::telemetry::{NoopTelemetrySink, TelemetryEvent, TelemetrySink};
 use crate::test_probe;
 use std::sync::Arc;
@@ -60,6 +61,9 @@ pub fn build_tree_with_telemetry(
         LockMode::Exclusive
     };
     let _lock = StoreRunLock::acquire(&config.store_root, "build-tree", mode)?;
+    if !config.dry_run {
+        Store::new(config.store_root.clone()).purge_existing_staging()?;
+    }
     let plan = plan(&config, telemetry.as_ref())?;
     telemetry.emit(
         TelemetryEvent::new("build_tree", "tree_planned")
@@ -381,7 +385,7 @@ fn apply(config: &BuildTreeConfig, plan: &Plan, telemetry: &dyn TelemetrySink) -
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn apply_desired_link(link: &DesiredLink) -> Result<()> {
     use std::os::unix::fs::symlink;
 
@@ -421,6 +425,7 @@ fn apply_desired_link(link: &DesiredLink) -> Result<()> {
     ));
     symlink(&link.target_text, &temp_path)
         .wrap_err_with(|| format!("create temporary symlink {:?}", temp_path))?;
+    test_probe::pause_or_fail("build-tree-before-replacement")?;
     fs::rename(&temp_path, &link.output_path).wrap_err_with(|| {
         let _ = fs::remove_file(&temp_path);
         format!(
@@ -431,12 +436,7 @@ fn apply_desired_link(link: &DesiredLink) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn apply_desired_link(_link: &DesiredLink) -> Result<()> {
-    bail!("build-tree symlink materialization is supported only on Unix platforms")
-}
-
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
 

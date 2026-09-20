@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use color_eyre::Result;
 use color_eyre::eyre::{WrapErr, bail, eyre};
 use crossbeam_channel::{Receiver, Sender};
+pub(crate) use rusqlite::ffi as sqlite_ffi;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::integrity::{IntegrityFinding as AuditFinding, push_finding};
@@ -441,13 +442,11 @@ fn sqlite_read_only_uri(path: &Path, immutable: bool) -> Result<String> {
     let absolute = path
         .canonicalize()
         .wrap_err_with(|| format!("canonicalize catalog path {:?}", path))?;
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let bytes = {
         use std::os::unix::ffi::OsStrExt;
         absolute.as_os_str().as_bytes().to_vec()
     };
-    #[cfg(not(unix))]
-    let bytes = absolute.to_string_lossy().into_owned().into_bytes();
 
     let mut uri = String::from("file:");
     uri.try_reserve(bytes.len().saturating_mul(3).saturating_add(32))
@@ -1821,6 +1820,11 @@ fn migrate(connection: &mut Connection) -> Result<()> {
 }
 
 fn open_writable_catalog(path: &Path) -> Result<Connection> {
+    // The test-only VFS observes SQLite's own CKPT_START file-control message,
+    // which is emitted from the checkpoint implementation after OP_Checkpoint
+    // has entered WAL checkpointing.  It must be installed before opening the
+    // writer connection so every database file uses the wrapped VFS.
+    test_probe::install_checkpoint_start_vfs()?;
     let mut connection = Connection::open(path)
         .wrap_err_with(|| format!("open catalog database in writer thread {path:?}"))?;
     connection
@@ -2256,6 +2260,7 @@ fn flush_imports(
             }
         }
     }
+    test_probe::pause_or_fail("catalog-writer-before-batch-commit")?;
     if let Err(error) = tx.commit() {
         emit(
             events,
@@ -2305,6 +2310,7 @@ fn flush_imports(
             elapsed_ms: started.elapsed().as_millis(),
         },
     );
+    test_probe::pause_or_fail("catalog-writer-after-batch-commit")?;
     if report
         .committed_batches
         .is_multiple_of(config.checkpoint_every_batches.get() as u64)
@@ -2342,11 +2348,12 @@ fn checkpoint(
             .execute_batch(TEST_INVALID_CHECKPOINT_SQL)
             .wrap_err("run injected SQLite checkpoint error")?;
     }
-    let (busy, log, checkpointed): (i64, i64, i64) = connection
+    let checkpoint_result: Result<(i64, i64, i64)> = connection
         .query_row(WAL_CHECKPOINT_PASSIVE_SQL, [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
-        .wrap_err("run passive WAL checkpoint")?;
+        .wrap_err("run passive WAL checkpoint");
+    let (busy, log, checkpointed) = checkpoint_result?;
     if busy < 0 || log < 0 || checkpointed < 0 {
         bail!(
             "invalid passive checkpoint result busy={busy} log={log} checkpointed={checkpointed}"

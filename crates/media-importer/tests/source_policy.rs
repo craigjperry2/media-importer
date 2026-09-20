@@ -100,6 +100,167 @@ fn workspace_manifests() -> Vec<PathBuf> {
 }
 
 #[test]
+fn milestone_eleven_conformance_matrix_references_existing_named_behavior_tests() {
+    let root = repository_root();
+    let matrix = read(&root.join("docs/from-scratch-in-rust/IMPLEMENTATION-MILESTONE11.md"));
+    let required = [
+        (
+            "tests/import_milestone.rs",
+            "repeat_real_import_observer_reports_metadata_skip_without_worker_lifecycle",
+        ),
+        (
+            "src/ingest.rs",
+            "exact_one_pass_read_events_are_emitted_before_post_read_failure_and_staging_is_cleaned",
+        ),
+        (
+            "tests/import_milestone.rs",
+            "real_import_creates_cas_and_catalog_then_rerun_reuses_blobs",
+        ),
+        (
+            "tests/gc_milestone.rs",
+            "catalog_foreign_key_and_domain_findings_block_all_gc_mutation",
+        ),
+        (
+            "tests/gc_milestone.rs",
+            "two_real_runs_mark_then_sweep_without_a_time_delay",
+        ),
+        (
+            "tests/import_milestone.rs",
+            "build_tree_creates_relative_symlinks_and_rerun_is_unchanged",
+        ),
+        (
+            "src/ingest.rs",
+            "default_configuration_and_configured_n_are_enforced_per_injected_mount",
+        ),
+        (
+            "tests/import_milestone.rs",
+            "real_import_creates_cas_and_catalog_then_rerun_reuses_blobs",
+        ),
+        (
+            "tests/telemetry_milestone.rs",
+            "import_jsonl_reconciles_real_staging_dry_run_and_writer_shutdown_checkpoint",
+        ),
+        (
+            "src/hashing.rs",
+            "synthetic_reader_is_hashed_without_filesystem_access",
+        ),
+    ];
+    for (path, name) in required {
+        assert!(matrix.contains(name), "matrix must name {name}");
+        let source = read(&root.join("crates/media-importer").join(path));
+        assert!(
+            source.contains(&format!("fn {name}(")),
+            "matrix reference {path}::{name} must exist"
+        );
+    }
+    assert!(
+        matrix.contains("page-cache"),
+        "matrix must document the one-pass/page-cache interpretation"
+    );
+    assert!(
+        matrix.contains("Linux and macOS"),
+        "matrix must qualify its platform evidence"
+    );
+}
+
+#[test]
+fn milestone_eleven_conformance_matrix_validates_every_requirement_row_and_reference() {
+    let root = repository_root();
+    let matrix_path = root.join("docs/from-scratch-in-rust/IMPLEMENTATION-MILESTONE11.md");
+    let matrix = read(&matrix_path);
+    let reference = Regex::new(
+        r"(?:(?P<path>(?:tests|src)/[A-Za-z0-9_./-]+\.rs)|(?P<module>[A-Za-z0-9_]+))::(?:tests::)?(?P<test>[A-Za-z0-9_]+)",
+    )
+    .expect("valid matrix reference expression");
+
+    let mut in_matrix = false;
+    let mut rows = 0_usize;
+    for (index, line) in matrix.lines().enumerate() {
+        if line == "## Spec Conformance Matrix" {
+            in_matrix = true;
+            continue;
+        }
+        if !in_matrix {
+            continue;
+        }
+        if !line.starts_with('|') {
+            if rows > 0 {
+                break;
+            }
+            continue;
+        }
+        if line.contains("---") || line.contains("SPEC.md requirement") {
+            continue;
+        }
+
+        let cells = line.split('|').collect::<Vec<_>>();
+        assert_eq!(
+            cells.len(),
+            5,
+            "matrix row {} must have exactly three cells: {line}",
+            index + 1
+        );
+        assert!(
+            !cells[1].trim().is_empty() && !cells[2].trim().is_empty(),
+            "matrix row {} must name a SPEC requirement and implementation boundary",
+            index + 1
+        );
+        let references = reference.captures_iter(cells[3]).collect::<Vec<_>>();
+        assert!(
+            !references.is_empty(),
+            "matrix row {} must contain at least one path::behavior-test reference",
+            index + 1
+        );
+        for capture in references {
+            let crate_root = root.join("crates/media-importer");
+            let source_path = capture.name("path").map_or_else(
+                || {
+                    crate_root
+                        .join("src")
+                        .join(format!("{}.rs", &capture["module"]))
+                },
+                |path| crate_root.join(path.as_str()),
+            );
+            let test = &capture["test"];
+            let source = read(&source_path);
+            assert!(
+                source.contains(&format!("fn {test}(")),
+                "matrix row {} references missing behavior test {}::{}",
+                index + 1,
+                source_path.display(),
+                test
+            );
+        }
+        rows += 1;
+    }
+    assert_eq!(
+        rows, 12,
+        "the M11 matrix must cover every listed SPEC conformance requirement"
+    );
+}
+
+#[test]
+fn unsupported_targets_fail_intentionally_without_non_unix_fallbacks() {
+    let root = repository_root();
+    let library = read(&root.join("crates/media-importer/src/lib.rs"));
+    assert!(
+        library.contains("#[cfg(not(any(target_os = \"linux\", target_os = \"macos\")))]\ncompile_error!(\"media-importer supports Linux and macOS only\")"),
+        "the library must intentionally reject every unsupported compilation target"
+    );
+    for path in production_rust_files() {
+        if path.file_name().is_some_and(|name| name == "lib.rs") {
+            continue;
+        }
+        let source = read(&path);
+        assert!(
+            !source.contains("cfg(not(unix))")
+                && !source.contains("cfg(not(any(target_os = \"linux\", target_os = \"macos\")))"),
+            "unsupported-target fallback found in {path:?}"
+        );
+    }
+}
+
+#[test]
 fn production_uses_stable_rust_2024() {
     let mut violations = Vec::new();
     let package = Regex::new(r"(?m)^\s*\[package\]\s*$").unwrap();

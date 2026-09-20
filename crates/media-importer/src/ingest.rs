@@ -158,6 +158,10 @@ pub enum IngestEvent {
         log: i64,
         checkpointed: i64,
     },
+    /// A configured periodic passive checkpoint has been requested after a
+    /// committed writer batch. Completion is emitted separately because the
+    /// checkpoint can fail operationally.
+    CatalogCheckpointRequested,
     /// Authoritative checkpoint total after the writer has joined, including
     /// the mandatory shutdown checkpoint that cannot be drained in-band.
     CatalogWriterFinished {
@@ -281,6 +285,9 @@ impl fmt::Debug for IngestEvent {
                 .field("busy", busy)
                 .field("log", log)
                 .field("checkpointed", checkpointed)
+                .finish(),
+            Self::CatalogCheckpointRequested => formatter
+                .debug_struct("CatalogCheckpointRequested")
                 .finish(),
             Self::CatalogWriterFinished { checkpoints } => formatter
                 .debug_struct("CatalogWriterFinished")
@@ -524,6 +531,9 @@ impl IngestObserver for TelemetryObserver {
                 .field("busy", busy as u64)
                 .field("log", log as u64)
                 .field("checkpointed", checkpointed as u64),
+            IngestEvent::CatalogCheckpointRequested => {
+                TelemetryEvent::new("import", "catalog_checkpoint_requested")
+            }
             IngestEvent::CatalogWriterFinished { checkpoints } => {
                 TelemetryEvent::new("import", "catalog_final_checkpoint")
                     .field("checkpoints", checkpoints)
@@ -586,7 +596,7 @@ fn real_import(
     observer: Arc<dyn IngestObserver>,
 ) -> Result<ImportReport> {
     let store = Store::new(config.store_root.clone());
-    store.prepare_for_import()?;
+    store.prepare_staging_for_import()?;
     let catalog = ReadOnlyCatalog::open_if_exists(&config.db_path)?;
     let writer_config = CatalogWriterConfig::default();
     let max_outstanding = writer_config.max_batch_records.get();
@@ -879,6 +889,9 @@ fn drain_catalog_events(writer: &CatalogWriterHandle, observer: &dyn IngestObser
                 log,
                 checkpointed,
             }),
+            CatalogWriterEvent::CheckpointRequested {
+                shutdown: false, ..
+            } => observer.observe(IngestEvent::CatalogCheckpointRequested),
             _ => {}
         }
     }
@@ -1077,6 +1090,10 @@ fn complete_work(
     report.files_hashed += 1;
     report.bytes_hashed += blob.size_bytes;
     report_store_outcome(report, &blob.outcome, blob.size_bytes);
+    // CAS installation is durable before the catalog request is admitted.
+    // Keeping this seam here lets recovery tests distinguish an adoptable
+    // orphan from a staging-only artifact without exposing a production API.
+    crate::test_probe::pause_or_fail("ingest-after-cas-install")?;
     let sequence = completed.work.sequence;
     context.tickets.insert(
         sequence,
@@ -1109,6 +1126,7 @@ fn complete_work(
         sequence,
         source_path: completed.work.candidate.relative_path.clone(),
     });
+    crate::test_probe::pause_or_fail("ingest-after-catalog-submission")?;
     drain_outcomes_to_limit(
         context.tickets,
         report,
@@ -2182,7 +2200,7 @@ mod tests {
                 workers_per_mount: NonZeroUsize::new(workers_per_mount).expect("non-zero workers"),
             })?;
             let store = Store::new(config.store_root.clone());
-            store.prepare_for_import()?;
+            store.prepare_staging_for_import()?;
             let writer = CatalogWriterHandle::spawn(config.db_path.clone(), writer_config)?;
             let result = execute_import(
                 candidates.into_iter(),

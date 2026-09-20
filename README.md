@@ -9,6 +9,15 @@ The Rust rewrite documentation under `docs/from-scratch-in-rust/` is
 authoritative. Material under `docs/old_python/` is historical context, not a
 behavior oracle.
 
+Semantic blob relationships and relationship-aware GC reachability are deferred;
+they are not implemented or claimed as Milestone 11 acceptance behavior.
+
+Supported targets are Linux and macOS only. Each real, exclusive command
+(`import`, `build-tree`, and `gc`) clears stale entries already present in the
+store-owned staging directory after acquiring its store lock. Audit and every
+dry run remain read-only and leave staging untouched; `import` alone creates a
+missing staging directory because it needs it for new content.
+
 ## Commands
 
 Import a source directory into the store and catalog:
@@ -266,6 +275,32 @@ Or run all hooks:
 ```sh
 prek run --all-files
 ```
+
+The normal suite keeps generated fixtures small. Release qualification runs the
+ignored extended I/O/recovery campaign (generated repeat fixture; it reports
+application stream facts rather than device throughput) with:
+
+```sh
+cargo test --workspace --test milestone11_extended -- --ignored
+```
+
+The normal suite covers fast staging/read-only and lifecycle regressions. The
+extended command is the deterministic subprocess campaign: it kills at staging
+creation and source copy, CAS install/catalog submission, batch
+commit/checkpoint, GC post-unlink/pre-sweep-commit, and build-tree replacement
+boundaries. It snapshots recursive staging structure, bytes, modes, and
+timestamps together with CAS, catalog, and WAL facts; proves audit/dry-run do
+not repair them; runs the permitted real recovery; and finishes with an audit
+that also proves lock release. It also closes a real JSONL pipe while importing
+to exercise reporting shutdown. The normal probe suite covers exact scheduler
+concurrency and queue bounds. The extended command reports first-read,
+unchanged metadata-skip, and `--no-metadata-skip` byte counts; crosses multiple
+default writer batches with observed periodic checkpoint attempts/completions
+and measured WAL size; and keeps JSONL parseable alongside a sustained
+real-PTY dashboard. “One pass” means bytes delivered through the application's
+sequential read/hash/staging stream; it does not establish physical disk reads
+or page-cache bypass. The checked-in GitHub Actions workflow is configured to
+run the normal and extended commands on Linux and macOS.
 
 ## Repository Layout
 

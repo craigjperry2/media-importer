@@ -1,5 +1,5 @@
 use std::fs;
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
@@ -80,7 +80,7 @@ fn real_import_creates_cas_and_catalog_then_rerun_reuses_blobs() {
         .child(".hidden")
         .write_str("hidden")
         .expect("write hidden");
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     symlink(
         source.child("a.txt").path(),
         source.child("linked.txt").path(),
@@ -136,7 +136,7 @@ fn real_import_creates_cas_and_catalog_then_rerun_reuses_blobs() {
     assert_catalog_counts(store.path(), 2, 3);
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn preinstall_barrier_forces_same_content_cas_race_with_one_create_and_one_reuse() {
     let temp = TempDir::new().expect("tempdir");
@@ -192,6 +192,126 @@ fn preinstall_barrier_forces_same_content_cas_race_with_one_create_and_one_reuse
             .count(),
         0,
         "both racing staging files are cleaned"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn cas_reuse_refuses_symlink_directory_and_wrong_size_entries() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for kind in ["symlink", "directory", "wrong-size"] {
+        let temp = TempDir::new().expect("tempdir");
+        let source = temp.child("source");
+        source.create_dir_all().expect("source dir");
+        source.child("file.bin").write_str("known bytes").unwrap();
+        let store = temp.child("store");
+        let blob = blob_path(store.path(), "known bytes");
+        fs::create_dir_all(blob.parent().unwrap()).unwrap();
+
+        let external = temp.child("external-target");
+        match kind {
+            "symlink" => {
+                external.write_str("external").unwrap();
+                fs::set_permissions(external.path(), fs::Permissions::from_mode(0o640)).unwrap();
+                symlink(external.path(), &blob).unwrap();
+            }
+            "directory" => fs::create_dir(&blob).unwrap(),
+            "wrong-size" => fs::write(&blob, b"short").unwrap(),
+            _ => unreachable!(),
+        }
+
+        run_import(source.path(), store.path()).failure();
+        assert_eq!(
+            fs::read_dir(store.child("staging").path()).unwrap().count(),
+            0,
+            "{kind}: rejected reuse must clean its staging file"
+        );
+        if kind == "symlink" {
+            assert_eq!(fs::read(external.path()).unwrap(), b"external");
+            assert_eq!(
+                fs::metadata(external.path()).unwrap().permissions().mode() & 0o777,
+                0o640,
+                "symlink target permissions must not be mutated"
+            );
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn cas_create_and_reuse_leave_blobs_at_0444() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().unwrap();
+    source.child("file.bin").write_str("known bytes").unwrap();
+    let store = temp.child("store");
+    run_import(source.path(), store.path()).success();
+    let blob = blob_path(store.path(), "known bytes");
+    assert_eq!(
+        fs::metadata(&blob).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+
+    fs::set_permissions(&blob, fs::Permissions::from_mode(0o640)).unwrap();
+    run_import_args(source.path(), store.path(), &["--no-metadata-skip"]).success();
+    assert_eq!(
+        fs::metadata(&blob).unwrap().permissions().mode() & 0o777,
+        0o444
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn final_path_replacement_during_reuse_cannot_chmod_external_target() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().unwrap();
+    source.child("file.bin").write_str("known bytes").unwrap();
+    let store = temp.child("store");
+    let blob = blob_path(store.path(), "known bytes");
+    fs::create_dir_all(blob.parent().unwrap()).unwrap();
+    fs::write(&blob, b"known bytes").unwrap();
+    let probe = temp.child("probe");
+    probe.create_dir_all().unwrap();
+    let stage = "store-before-existing-cas-open";
+    let mut child = ProcessCommand::new(assert_cmd::cargo::cargo_bin("media-importer"))
+        .args(["import", "--store"])
+        .arg(store.path())
+        .arg("--source")
+        .arg(source.path())
+        .env(
+            "MEDIA_IMPORTER_TEST_LIFECYCLE_PROBE",
+            format!("{}|{stage}", probe.path().display()),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_path(probe.child(format!("{stage}.ready")).path());
+
+    let external = temp.child("external-target");
+    external.write_str("external").unwrap();
+    fs::set_permissions(external.path(), fs::Permissions::from_mode(0o640)).unwrap();
+    fs::remove_file(&blob).unwrap();
+    symlink(external.path(), &blob).unwrap();
+    probe
+        .child(format!("{stage}.release"))
+        .write_str("release")
+        .unwrap();
+    assert!(
+        !child.wait().unwrap().success(),
+        "replacement must be rejected"
+    );
+    assert_eq!(fs::read(external.path()).unwrap(), b"external");
+    assert_eq!(
+        fs::metadata(external.path()).unwrap().permissions().mode() & 0o777,
+        0o640,
+        "external symlink target remains unmodified"
     );
 }
 
@@ -580,7 +700,7 @@ fn wrong_size_cataloged_cas_blob_is_hashed_then_fails_safely() {
     assert_source_row(store.path(), "a.txt", 1, "alpha");
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn source_root_alias_reuses_one_identity_without_hashing() {
     let temp = TempDir::new().expect("tempdir");
@@ -707,6 +827,102 @@ fn dry_run_existing_store_does_not_mutate_catalog_or_staging() {
     assert_source_row(store.path(), "a.txt", 1, "alpha");
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn every_read_only_command_preserves_recursive_staging_and_missing_staging() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().unwrap();
+    source.child("a.txt").write_str("alpha").unwrap();
+    let store = temp.child("store");
+    run_import(source.path(), store.path()).success();
+    let staging = store.child("staging");
+    staging.child("nested/deeper").create_dir_all().unwrap();
+    staging
+        .child("nested/deeper/evidence.tmp")
+        .write_binary(b"evidence")
+        .unwrap();
+    symlink(
+        staging.child("nested/deeper/evidence.tmp").path(),
+        staging.child("nested-link").path(),
+    )
+    .unwrap();
+    let before = recursive_staging_snapshot(staging.path());
+    let browse = temp.child("browse");
+
+    run_import_args(source.path(), store.path(), &["--dry-run"]).success();
+    run_build_tree(store.path(), browse.path(), &["--dry-run"]).success();
+    Command::cargo_bin("media-importer")
+        .unwrap()
+        .args(["gc", "--store"])
+        .arg(store.path())
+        .arg("--dry-run")
+        .assert()
+        .success();
+    Command::cargo_bin("media-importer")
+        .unwrap()
+        .args(["audit", "--store"])
+        .arg(store.path())
+        .assert()
+        .success();
+    assert_eq!(recursive_staging_snapshot(staging.path()), before);
+
+    fs::remove_dir_all(staging.path()).unwrap();
+    run_import_args(source.path(), store.path(), &["--dry-run"]).success();
+    run_build_tree(store.path(), browse.path(), &["--dry-run"]).success();
+    Command::cargo_bin("media-importer")
+        .unwrap()
+        .args(["gc", "--store"])
+        .arg(store.path())
+        .arg("--dry-run")
+        .assert()
+        .success();
+    Command::cargo_bin("media-importer")
+        .unwrap()
+        .args(["audit", "--store"])
+        .arg(store.path())
+        .assert()
+        .success();
+    assert!(
+        !staging.path().exists(),
+        "read-only commands never recreate staging"
+    );
+}
+
+#[test]
+fn staging_cleanup_failure_stops_import_before_catalog_or_cas_mutation() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source directory");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("source file");
+    let store = temp.child("store");
+    store.create_dir_all().expect("store directory");
+    store
+        .child("staging")
+        .write_str("not a directory")
+        .expect("invalid staging");
+
+    run_import(source.path(), store.path())
+        .failure()
+        .stderr(predicate::str::contains("staging path is not a directory"));
+
+    assert_eq!(
+        fs::read(store.child("staging").path()).expect("staging bytes"),
+        b"not a directory"
+    );
+    assert!(
+        !store.child("catalog.sqlite").path().exists(),
+        "cleanup precedes catalog creation"
+    );
+    assert!(
+        !store.child("blobs").path().exists(),
+        "cleanup precedes CAS creation"
+    );
+}
+
 #[test]
 fn empty_source_directory_succeeds() {
     let temp = TempDir::new().expect("tempdir");
@@ -769,7 +985,7 @@ fn newer_schema_version_fails_clearly() {
         .stderr(predicate::str::contains("newer than supported version 1"));
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn build_tree_creates_relative_symlinks_and_rerun_is_unchanged() {
     let temp = TempDir::new().expect("tempdir");
@@ -817,7 +1033,7 @@ fn build_tree_creates_relative_symlinks_and_rerun_is_unchanged() {
         .stdout(predicate::str::contains("Links unchanged: 3"));
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn build_tree_dry_run_reports_without_mutating() {
     let temp = TempDir::new().expect("tempdir");
@@ -839,7 +1055,55 @@ fn build_tree_dry_run_reports_without_mutating() {
     assert!(!browse.path().exists());
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn real_build_tree_purges_existing_staging_but_dry_run_preserves_it() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("source file");
+    let store = temp.child("store");
+    let browse = temp.child("browse");
+    run_import(source.path(), store.path()).success();
+    let stale = store.child("staging/stale.tmp");
+    stale.write_str("stale").expect("stale staging");
+
+    run_build_tree(store.path(), browse.path(), &["--dry-run"]).success();
+    assert!(stale.path().exists(), "dry run must not purge staging");
+
+    run_build_tree(store.path(), browse.path(), &[]).success();
+    assert!(
+        !stale.path().exists(),
+        "real build-tree purges stale staging"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn staging_cleanup_failure_stops_build_tree_before_browse_mutation() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().unwrap();
+    source.child("a.txt").write_str("alpha").unwrap();
+    let store = temp.child("store");
+    let browse = temp.child("browse");
+    run_import(source.path(), store.path()).success();
+    fs::remove_dir_all(store.child("staging").path()).unwrap();
+    store.child("staging").write_str("not a directory").unwrap();
+
+    run_build_tree(store.path(), browse.path(), &[])
+        .failure()
+        .stderr(predicate::str::contains("staging path is not a directory"));
+    assert!(
+        !browse.path().exists(),
+        "cleanup precedes browse-tree changes"
+    );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn build_tree_rejects_missing_catalog_and_db_inside_browse_tree() {
     let temp = TempDir::new().expect("tempdir");
@@ -866,7 +1130,7 @@ fn build_tree_rejects_missing_catalog_and_db_inside_browse_tree() {
     ));
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn build_tree_removes_stale_owned_symlinks_without_pruning_nonempty_dirs() {
     let temp = TempDir::new().expect("tempdir");
@@ -904,7 +1168,7 @@ fn build_tree_removes_stale_owned_symlinks_without_pruning_nonempty_dirs() {
     assert!(stale_dir.path().is_dir());
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn build_tree_rejects_cas_blob_paths_that_are_symlinks() {
     let temp = TempDir::new().expect("tempdir");
@@ -926,7 +1190,7 @@ fn build_tree_rejects_cas_blob_paths_that_are_symlinks() {
     assert!(!browse.path().exists());
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn build_tree_replaces_owned_absolute_symlinks_and_preserves_user_symlinks() {
     let temp = TempDir::new().expect("tempdir");
@@ -1060,7 +1324,7 @@ fn run_build_tree(store: &Path, browse: &Path, extra: &[&str]) -> assert_cmd::as
         .assert()
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn assert_materialized_link(
     browse: &Path,
     store: &Path,
@@ -1099,7 +1363,7 @@ fn assert_materialized_link(
     assert_eq!(count, 1);
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn materialized_path(
     browse: &Path,
     expected_prefix: &str,
@@ -1114,7 +1378,7 @@ fn assert_blob(store: &Path, contents: &str, read_only: bool) {
     let path = blob_path(store, contents);
     assert!(path.exists(), "blob exists at {path:?}");
     assert_eq!(fs::read_to_string(&path).expect("read blob"), contents);
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if read_only {
         assert_eq!(
             fs::metadata(&path)
@@ -1154,6 +1418,71 @@ fn assert_catalog_counts(store: &Path, blobs: i64, source_files: i64) {
         .expect("source count");
     assert_eq!(blob_count, blobs);
     assert_eq!(source_count, source_files);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Debug, Eq, PartialEq)]
+struct StagingSnapshot {
+    relative: Vec<u8>,
+    kind: &'static str,
+    bytes: Vec<u8>,
+    mode: u32,
+    modified_ns: u128,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn recursive_staging_snapshot(root: &Path) -> Vec<StagingSnapshot> {
+    fn visit(root: &Path, path: &Path, snapshots: &mut Vec<StagingSnapshot>) {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        let kind = if metadata.file_type().is_dir() {
+            "dir"
+        } else if metadata.file_type().is_symlink() {
+            "symlink"
+        } else {
+            "file"
+        };
+        snapshots.push(StagingSnapshot {
+            relative: path
+                .strip_prefix(root)
+                .unwrap()
+                .as_os_str()
+                .as_encoded_bytes()
+                .to_vec(),
+            kind,
+            bytes: if metadata.file_type().is_file() {
+                fs::read(path).unwrap()
+            } else if metadata.file_type().is_symlink() {
+                fs::read_link(path)
+                    .unwrap()
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .to_vec()
+            } else {
+                Vec::new()
+            },
+            mode: metadata.permissions().mode(),
+            modified_ns: metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        });
+        if metadata.file_type().is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                visit(root, &entry.unwrap().path(), snapshots);
+            }
+        }
+    }
+
+    let mut snapshots = Vec::new();
+    if root.exists() {
+        for entry in fs::read_dir(root).unwrap() {
+            visit(root, &entry.unwrap().path(), &mut snapshots);
+        }
+    }
+    snapshots.sort_by(|left, right| left.relative.cmp(&right.relative));
+    snapshots
 }
 
 fn assert_source_row(store: &Path, relative_path: &str, seen_count: i64, contents: &str) {

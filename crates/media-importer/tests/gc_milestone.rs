@@ -66,6 +66,39 @@ fn clean_referenced_store_is_an_exact_noop_even_when_source_file_is_deleted() {
 }
 
 #[test]
+fn real_gc_purges_existing_staging_but_dry_run_preserves_it() {
+    let temp = imported("staging-recovery");
+    let staging = temp.child("store/staging/stale.tmp");
+    staging.write_str("stale").unwrap();
+
+    gc(&temp, &["--dry-run"]).success();
+    assert!(staging.path().exists(), "dry-run GC must not purge staging");
+
+    gc(&temp, &[]).success();
+    assert!(!staging.path().exists(), "real GC must purge stale staging");
+}
+
+#[test]
+fn staging_cleanup_failure_stops_gc_before_catalog_or_cas_mutation() {
+    let temp = imported("gc-cleanup-failure");
+    let before = durable_state(&temp);
+    fs::remove_dir_all(temp.child("store/staging").path()).unwrap();
+    temp.child("store/staging")
+        .write_str("not a directory")
+        .unwrap();
+
+    gc(&temp, &[])
+        .failure()
+        .stderr(predicate::str::contains("staging path is not a directory"));
+
+    assert_eq!(
+        durable_state(&temp),
+        before,
+        "GC must fail before later mutation"
+    );
+}
+
+#[test]
 fn two_real_runs_mark_then_sweep_without_a_time_delay() {
     let temp = imported("collect-me");
     make_unreachable(&temp);
@@ -406,7 +439,7 @@ fn representative_cas_findings_block_marks_and_preserve_the_invalid_state() {
     assert_eq!(fs::read(&blob).unwrap(), b"substantially-longer");
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn symlinked_and_nonregular_expected_cas_entries_are_never_interrupted_sweeps() {
     use std::os::unix::fs::symlink;
@@ -645,7 +678,7 @@ fn missing_store_blobs_and_catalog_are_validation_errors_and_are_never_created()
         .assert("unchanged");
 }
 
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn symlinked_store_blobs_and_catalog_are_rejected_without_application_mutation() {
     use std::os::unix::fs::symlink;
@@ -966,15 +999,7 @@ fn assert_action_order(output: &str, actions: &[String]) {
     }
 }
 
-#[cfg(unix)]
 fn writable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
-}
-
-#[cfg(not(unix))]
-fn writable(path: &Path) {
-    let mut permissions = fs::metadata(path).unwrap().permissions();
-    permissions.set_readonly(false);
-    fs::set_permissions(path, permissions).unwrap();
 }
