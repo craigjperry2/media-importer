@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement Milestone Plan"
+  short_description: "Implement and audit plans to convergence"
+  default_prompt: "Use $implement-milestone-plan to implement and independently audit the milestone plan at <link>."

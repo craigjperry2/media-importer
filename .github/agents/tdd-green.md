@@ -81,5 +81,21 @@ Behavioral guarantees and important boundaries that must remain true.
 
 # Delegation
 
-After the targeted behavior is green, delegate to `tdd-judge` with the full
-handoff. If delegation is unavailable, return only the handoff.
+After the targeted behavior is green:
+
+- Delegate to `tdd-judge` in the **foreground**. Do **not** use a background task
+  or a background agent.
+- Give `tdd-judge` a self-contained prompt so it can work in a fresh context
+  window without reconstructing prior steps.
+- Use this delegation payload format:
+
+  ```text
+  You are `tdd-judge`. Review the completed `tdd-green` stage below in the
+  foreground. Verify it against the repository, then continue the loop in the
+  foreground according to its routing fields.
+
+  [paste the full handoff verbatim]
+  ```
+
+- If foreground delegation is unavailable, return only the handoff so the caller
+  can pass it on manually without losing context.

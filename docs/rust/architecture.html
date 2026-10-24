@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Media Importer - Milestone 1 Architecture</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #17212b;
+        --muted: #607080;
+        --paper: #f7f8f5;
+        --surface: #ffffff;
+        --line: #d9dfd3;
+        --source: #197a86;
+        --store: #bf5b2c;
+        --catalog: #5f6fb5;
+        --ingest: #4f7d3f;
+        --warn: #b8871b;
+        --shadow: 0 22px 70px rgba(28, 39, 48, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 12% 8%, rgba(25, 122, 134, 0.12), transparent 28rem),
+          radial-gradient(circle at 90% 18%, rgba(191, 91, 44, 0.12), transparent 30rem),
+          linear-gradient(180deg, #fbfbf8 0%, var(--paper) 38%, #eef2ed 100%);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        line-height: 1.5;
+      }
+
+      main {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 42px 0 56px;
+      }
+
+      header {
+        display: grid;
+        grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.8fr);
+        gap: 28px;
+        align-items: end;
+        margin-bottom: 30px;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 760px;
+        margin-bottom: 14px;
+        font-size: clamp(2.35rem, 5vw, 5rem);
+        line-height: 0.96;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        margin-bottom: 16px;
+        font-size: clamp(1.55rem, 2.3vw, 2.4rem);
+        line-height: 1.05;
+        letter-spacing: 0;
+      }
+
+      h3 {
+        margin-bottom: 8px;
+        font-size: 1rem;
+        letter-spacing: 0;
+      }
+
+      p {
+        color: var(--muted);
+      }
+
+      code {
+        border: 1px solid #dfe5da;
+        border-radius: 6px;
+        background: #f4f6f1;
+        padding: 0.12rem 0.32rem;
+        color: #263440;
+        font-size: 0.92em;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 16px;
+        color: #496255;
+        font-size: 0.78rem;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow::before {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--ingest);
+        content: "";
+      }
+
+      .lead {
+        max-width: 720px;
+        margin-bottom: 0;
+        color: #435463;
+        font-size: clamp(1.02rem, 1.6vw, 1.24rem);
+      }
+
+      .command-panel {
+        border: 1px solid rgba(23, 33, 43, 0.12);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.82);
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
+
+      .command-panel .bar {
+        display: flex;
+        gap: 7px;
+        padding: 12px 14px;
+        border-bottom: 1px solid rgba(23, 33, 43, 0.1);
+        background: #edf1e9;
+      }
+
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #c55c46;
+      }
+
+      .dot:nth-child(2) {
+        background: #d9a84a;
+      }
+
+      .dot:nth-child(3) {
+        background: #5d9a73;
+      }
+
+      pre {
+        margin: 0;
+        padding: 18px;
+        overflow-x: auto;
+        color: #21313d;
+        font: 0.88rem/1.55 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      .section {
+        margin-top: 24px;
+        padding: 28px;
+        border: 1px solid rgba(23, 33, 43, 0.1);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.78);
+        box-shadow: 0 12px 42px rgba(28, 39, 48, 0.08);
+      }
+
+      .diagram-wrap {
+        overflow-x: auto;
+        padding-bottom: 8px;
+      }
+
+      .diagram {
+        display: block;
+        min-width: 980px;
+        width: 100%;
+        height: auto;
+      }
+
+      .module {
+        filter: drop-shadow(0 12px 18px rgba(29, 40, 48, 0.1));
+      }
+
+      .module rect {
+        stroke-width: 1.5;
+      }
+
+      .module-title {
+        fill: #17212b;
+        font-size: 18px;
+        font-weight: 800;
+      }
+
+      .module-small {
+        fill: #4c5f6c;
+        font-size: 13px;
+      }
+
+      .label {
+        fill: #354551;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .arrow {
+        fill: none;
+        stroke: #62717b;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-width: 2.3;
+      }
+
+      .arrow-dry {
+        fill: none;
+        stroke: var(--warn);
+        stroke-dasharray: 6 6;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-width: 2.3;
+      }
+
+      .lane-title {
+        fill: #273843;
+        font-size: 13px;
+        font-weight: 800;
+        letter-spacing: 0;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .tile {
+        min-height: 176px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+      }
+
+      .tile strong {
+        display: block;
+        margin-bottom: 8px;
+      }
+
+      .tile p {
+        margin-bottom: 0;
+        font-size: 0.94rem;
+      }
+
+      .stripe {
+        width: 42px;
+        height: 5px;
+        margin-bottom: 15px;
+        border-radius: 999px;
+        background: var(--source);
+      }
+
+      .stripe.store {
+        background: var(--store);
+      }
+
+      .stripe.catalog {
+        background: var(--catalog);
+      }
+
+      .stripe.ingest {
+        background: var(--ingest);
+      }
+
+      .workflow {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+
+      .steps {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        counter-reset: step;
+      }
+
+      .steps.continued {
+        counter-reset: step 4;
+      }
+
+      .steps li {
+        position: relative;
+        min-height: 72px;
+        margin-bottom: 12px;
+        padding: 14px 14px 14px 62px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--surface);
+        color: #445664;
+      }
+
+      .steps li::before {
+        position: absolute;
+        top: 14px;
+        left: 14px;
+        display: grid;
+        width: 34px;
+        height: 34px;
+        place-items: center;
+        border-radius: 50%;
+        background: #23323d;
+        color: #fff;
+        content: counter(step);
+        counter-increment: step;
+        font-size: 0.84rem;
+        font-weight: 800;
+      }
+
+      .steps strong {
+        display: block;
+        margin-bottom: 2px;
+        color: var(--ink);
+      }
+
+      .callout {
+        border-left: 5px solid var(--warn);
+        background: #fff9e8;
+      }
+
+      .schema {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+
+      .table-box {
+        padding: 18px;
+        border: 1px solid #ccd5e6;
+        border-radius: 8px;
+        background: #fbfcff;
+      }
+
+      .table-box ul {
+        margin: 12px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .table-box li {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 8px 0;
+        border-top: 1px solid #e5eaf5;
+        color: #4a5d6b;
+        font-size: 0.93rem;
+      }
+
+      .table-box span {
+        color: #7b8794;
+        white-space: nowrap;
+      }
+
+      .rules {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .rule {
+        padding: 18px;
+        border-radius: 8px;
+        background: #263440;
+        color: #edf4f2;
+      }
+
+      .rule p {
+        margin-bottom: 0;
+        color: #cbd8d6;
+        font-size: 0.94rem;
+      }
+
+      footer {
+        margin-top: 28px;
+        color: #697784;
+        font-size: 0.9rem;
+      }
+
+      @media (max-width: 900px) {
+        main {
+          width: min(100% - 28px, 760px);
+          padding-top: 26px;
+        }
+
+        header,
+        .workflow,
+        .schema {
+          grid-template-columns: 1fr;
+        }
+
+        .grid,
+        .rules {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+
+      @media (max-width: 620px) {
+        .grid,
+        .rules {
+          grid-template-columns: 1fr;
+        }
+
+        .section {
+          padding: 20px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <div class="eyebrow">Milestone 1 Architecture</div>
+          <h1>Directory import into the content-addressed store</h1>
+          <p class="lead">
+            The first Rust slice keeps one command narrow and complete: scan a source
+            directory, hash regular files, install immutable BLAKE3-addressed blobs, and
+            record source observations in SQLite.
+          </p>
+        </div>
+        <aside class="command-panel" aria-label="Milestone 1 command">
+          <div class="bar" aria-hidden="true">
+            <span class="dot"></span>
+            <span class="dot"></span>
+            <span class="dot"></span>
+          </div>
+          <pre><code>media-importer import \
+  --store &lt;STORE_ROOT&gt; \
+  --source &lt;SOURCE_DIRECTORY&gt; \
+  [--db &lt;DB_PATH&gt;] \
+  [--dry-run] \
+  [--chunk-size &lt;BYTES&gt;]</code></pre>
+        </aside>
+      </header>
+
+      <section class="section" aria-labelledby="diagram-title">
+        <h2 id="diagram-title">Module Boundaries</h2>
+        <p>
+          Milestone 1 uses a functional core with side effects at the module edges. The
+          CLI validates and dispatches, ingest coordinates behavior-level interfaces,
+          and low-level filesystem or SQLite details stay inside store and catalog.
+        </p>
+
+        <div class="diagram-wrap" role="img" aria-label="Architecture diagram for milestone 1 import workflow">
+          <svg class="diagram" viewBox="0 0 1120 620" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <marker id="arrow-head" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+                <path d="M2,2 L10,6 L2,10 Z" fill="#62717b" />
+              </marker>
+              <marker id="dry-head" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+                <path d="M2,2 L10,6 L2,10 Z" fill="#b8871b" />
+              </marker>
+              <linearGradient id="cli-grad" x1="0" x2="1" y1="0" y2="1">
+                <stop offset="0%" stop-color="#ffffff" />
+                <stop offset="100%" stop-color="#edf6f3" />
+              </linearGradient>
+              <linearGradient id="ingest-grad" x1="0" x2="1" y1="0" y2="1">
+                <stop offset="0%" stop-color="#ffffff" />
+                <stop offset="100%" stop-color="#eef3e7" />
+              </linearGradient>
+              <linearGradient id="store-grad" x1="0" x2="1" y1="0" y2="1">
+                <stop offset="0%" stop-color="#ffffff" />
+                <stop offset="100%" stop-color="#fff1ea" />
+              </linearGradient>
+              <linearGradient id="catalog-grad" x1="0" x2="1" y1="0" y2="1">
+                <stop offset="0%" stop-color="#ffffff" />
+                <stop offset="100%" stop-color="#eef1ff" />
+              </linearGradient>
+            </defs>
+
+            <rect x="24" y="28" width="1072" height="560" rx="18" fill="rgba(255,255,255,0.58)" stroke="#d9dfd3" />
+            <text x="58" y="68" class="lane-title">user-facing shell</text>
+            <text x="58" y="500" class="lane-title">durable state</text>
+
+            <g class="module">
+              <rect x="60" y="100" width="190" height="110" rx="12" fill="url(#cli-grad)" stroke="#9fc8c3" />
+              <text x="88" y="140" class="module-title">CLI</text>
+              <text x="88" y="164" class="module-small">clap parsing</text>
+              <text x="88" y="184" class="module-small">validation</text>
+              <text x="88" y="204" class="module-small">summary output</text>
+            </g>
+
+            <g class="module">
+              <rect x="318" y="92" width="230" height="126" rx="12" fill="url(#ingest-grad)" stroke="#a9c58a" />
+              <text x="348" y="134" class="module-title">ingest</text>
+              <text x="348" y="158" class="module-small">import_source(config)</text>
+              <text x="348" y="178" class="module-small">orchestrates scan, store, catalog</text>
+              <text x="348" y="198" class="module-small">builds ImportReport</text>
+            </g>
+
+            <g class="module">
+              <rect x="82" y="286" width="210" height="118" rx="12" fill="#ffffff" stroke="#a9c8cd" />
+              <text x="112" y="330" class="module-title">paths</text>
+              <text x="112" y="354" class="module-small">canonical identities</text>
+              <text x="112" y="374" class="module-small">overlap checks</text>
+              <text x="112" y="394" class="module-small">CAS path construction</text>
+            </g>
+
+            <g class="module">
+              <rect x="356" y="286" width="210" height="118" rx="12" fill="#ffffff" stroke="#86bbc3" />
+              <text x="386" y="330" class="module-title">scanner</text>
+              <text x="386" y="354" class="module-small">walkdir traversal</text>
+              <text x="386" y="374" class="module-small">regular files only</text>
+              <text x="386" y="394" class="module-small">sorted candidates</text>
+            </g>
+
+            <g class="module">
+              <rect x="640" y="252" width="218" height="152" rx="12" fill="url(#store-grad)" stroke="#df9b73" />
+              <text x="670" y="296" class="module-title">store</text>
+              <text x="670" y="320" class="module-small">chunked read/hash/write</text>
+              <text x="670" y="340" class="module-small">UUID staging file</text>
+              <text x="670" y="360" class="module-small">hard-link install</text>
+              <text x="670" y="380" class="module-small">read-only blobs</text>
+            </g>
+
+            <g class="module">
+              <rect x="642" y="92" width="218" height="126" rx="12" fill="url(#catalog-grad)" stroke="#aab4e0" />
+              <text x="672" y="134" class="module-title">catalog</text>
+              <text x="672" y="158" class="module-small">rusqlite hidden inside</text>
+              <text x="672" y="178" class="module-small">schema v1 migration</text>
+              <text x="672" y="198" class="module-small">per-file transaction</text>
+            </g>
+
+            <g class="module">
+              <rect x="922" y="96" width="130" height="118" rx="12" fill="#ffffff" stroke="#bdc5e6" />
+              <text x="952" y="140" class="module-title">SQLite</text>
+              <text x="952" y="164" class="module-small">blobs</text>
+              <text x="952" y="184" class="module-small">source_files</text>
+            </g>
+
+            <g class="module">
+              <rect x="902" y="278" width="154" height="126" rx="12" fill="#ffffff" stroke="#e6b190" />
+              <text x="932" y="320" class="module-title">CAS</text>
+              <text x="932" y="344" class="module-small">blobs/aa/bb/hash</text>
+              <text x="932" y="364" class="module-small">staging/uuid</text>
+              <text x="932" y="384" class="module-small">catalog.sqlite</text>
+            </g>
+
+            <g class="module">
+              <rect x="450" y="462" width="220" height="82" rx="12" fill="#fff9e8" stroke="#e0c36f" />
+              <text x="480" y="502" class="module-title">dry-run path</text>
+              <text x="480" y="526" class="module-small">hash and inspect without mutation</text>
+            </g>
+
+            <path class="arrow" d="M250 154 C274 154, 290 154, 318 154" marker-end="url(#arrow-head)" />
+            <text x="262" y="138" class="label">validated config</text>
+
+            <path class="arrow" d="M430 218 L430 286" marker-end="url(#arrow-head)" />
+            <text x="448" y="254" class="label">scan request</text>
+
+            <path class="arrow" d="M548 154 L642 154" marker-end="url(#arrow-head)" />
+            <text x="566" y="138" class="label">record outcomes</text>
+
+            <path class="arrow" d="M548 184 C594 198, 614 238, 640 294" marker-end="url(#arrow-head)" />
+            <text x="578" y="236" class="label">ingest each file</text>
+
+            <path class="arrow" d="M462 286 C494 252, 526 238, 548 198" marker-end="url(#arrow-head)" />
+            <text x="502" y="256" class="label">candidates returned</text>
+
+            <path class="arrow" d="M858 154 L922 154" marker-end="url(#arrow-head)" />
+            <text x="866" y="138" class="label">SQL</text>
+
+            <path class="arrow" d="M858 342 L902 342" marker-end="url(#arrow-head)" />
+            <text x="858" y="326" class="label">install or reuse</text>
+
+            <path class="arrow" d="M186 210 L186 286" marker-end="url(#arrow-head)" />
+            <text x="204" y="254" class="label">path types</text>
+
+            <path class="arrow-dry" d="M462 404 C468 450, 488 470, 516 486" marker-end="url(#dry-head)" />
+            <path class="arrow-dry" d="M744 404 C720 450, 666 478, 638 494" marker-end="url(#dry-head)" />
+            <path class="arrow-dry" d="M752 218 C738 272, 720 418, 632 486" marker-end="url(#dry-head)" />
+            <text x="686" y="472" class="label" fill="#8b6a12">read-only checks</text>
+          </svg>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="responsibilities-title">
+        <h2 id="responsibilities-title">Responsibility Map</h2>
+        <div class="grid">
+          <article class="tile">
+            <div class="stripe ingest"></div>
+            <strong>CLI</strong>
+            <p>
+              Owns argument parsing, command-level validation, dispatch to
+              <code>ingest::import_source</code>, tracing setup, and concise stdout
+              summaries.
+            </p>
+          </article>
+          <article class="tile">
+            <div class="stripe"></div>
+            <strong>Paths</strong>
+            <p>
+              Owns canonicalization, source/store/database overlap rejection,
+              source-relative path serialization, staging paths, and CAS sharding paths.
+            </p>
+          </article>
+          <article class="tile">
+            <div class="stripe"></div>
+            <strong>Scanner</strong>
+            <p>
+              Uses <code>walkdir</code> to collect sorted regular-file candidates,
+              including hidden files while ignoring symlinked files and directories.
+            </p>
+          </article>
+          <article class="tile">
+            <div class="stripe ingest"></div>
+            <strong>Ingest</strong>
+            <p>
+              Coordinates scanner, store, catalog, clock, and report counters through
+              behavior-level APIs. It aborts on the first error.
+            </p>
+          </article>
+          <article class="tile">
+            <div class="stripe store"></div>
+            <strong>Store</strong>
+            <p>
+              Reads each source once in chunks, hashes with BLAKE3, writes a staging
+              file, installs with hard-link-then-unlink, and makes blobs read-only.
+            </p>
+          </article>
+          <article class="tile">
+            <div class="stripe catalog"></div>
+            <strong>Catalog</strong>
+            <p>
+              Hides SQLite connection handling, PRAGMAs, schema versioning, migrations,
+              and the per-file transaction that records imported files.
+            </p>
+          </article>
+          <article class="tile">
+            <div class="stripe store"></div>
+            <strong>CAS Layout</strong>
+            <p>
+              Stores blobs under <code>blobs/&lt;hex[0..2]&gt;/&lt;hex[2..4]&gt;/&lt;hash&gt;</code>
+              plus a sibling <code>staging</code> directory and default
+              <code>catalog.sqlite</code>.
+            </p>
+          </article>
+          <article class="tile">
+            <div class="stripe catalog"></div>
+            <strong>Reporting</strong>
+            <p>
+              Stable command output is a human summary. Internal diagnostics use
+              <code>tracing</code>; progress bars and JSON output are deferred.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="workflow-title">
+        <h2 id="workflow-title">Real Import Workflow</h2>
+        <div class="workflow">
+          <ol class="steps">
+            <li>
+              <strong>Validate paths and command config</strong>
+              Canonicalize the source root, validate or derive store and database paths,
+              reject source/store/database overlap, and construct typed identities.
+            </li>
+            <li>
+              <strong>Prepare durable edges</strong>
+              Create the store root and known children if needed, purge stale staging
+              contents, and open or initialize the SQLite catalog.
+            </li>
+            <li>
+              <strong>Scan deterministically</strong>
+              Collect regular-file candidates from the source directory and sort by
+              slash-normalized source-relative path.
+            </li>
+            <li>
+              <strong>Ingest each candidate</strong>
+              Read the file in configured chunks, hash while writing to staging, verify
+              size and mtime stability, and compute the final CAS path from the hash.
+            </li>
+          </ol>
+          <ol class="steps continued">
+            <li>
+              <strong>Install or reuse blob</strong>
+              Hard-link the staged file into the CAS if absent. If present, verify size,
+              make sure permissions are read-only, and remove the staged file.
+            </li>
+            <li>
+              <strong>Commit catalog observation</strong>
+              In one per-file transaction, upsert <code>blobs</code>, upsert
+              <code>source_files</code>, preserve first-seen data, and increment
+              <code>seen_count</code>.
+            </li>
+            <li>
+              <strong>Update import report</strong>
+              Count files seen, created/reused blobs, inserted/updated source records,
+              bytes seen, and bytes written.
+            </li>
+            <li>
+              <strong>Stop on first failure</strong>
+              Earlier successful files remain imported. There is no milestone 1 rollback;
+              snapshots and future audit/GC handle recovery concerns.
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section callout" aria-labelledby="dry-run-title">
+        <h2 id="dry-run-title">Dry-Run Contract</h2>
+        <p>
+          Dry-run is read-only against durable state. It may validate paths, scan source
+          files, hash source data, inspect existing CAS blobs, read an existing catalog
+          without mutation, and produce the same shape of report using "would" language.
+        </p>
+        <p>
+          It must not create the store root, <code>blobs</code>, <code>staging</code>,
+          database files, WAL or SHM files, parent directories, migrations, blob files, or
+          catalog records. Missing catalog means "empty catalog" for planning purposes.
+        </p>
+      </section>
+
+      <section class="section" aria-labelledby="schema-title">
+        <h2 id="schema-title">Catalog Schema V1</h2>
+        <div class="schema">
+          <article class="table-box">
+            <h3>blobs</h3>
+            <p>Content identity and lifecycle state for each unique BLAKE3 hash.</p>
+            <ul>
+              <li><strong>hash</strong><span>TEXT primary key</span></li>
+              <li><strong>size_bytes</strong><span>INTEGER</span></li>
+              <li><strong>created_at_ms</strong><span>INTEGER</span></li>
+              <li><strong>deleted_at_ms</strong><span>nullable INTEGER</span></li>
+            </ul>
+          </article>
+          <article class="table-box">
+            <h3>source_files</h3>
+            <p>Source path observations pointing many source paths at one blob.</p>
+            <ul>
+              <li><strong>source_root</strong><span>canonical text</span></li>
+              <li><strong>relative_path</strong><span>slash-normalized</span></li>
+              <li><strong>blob_hash</strong><span>FK to blobs</span></li>
+              <li><strong>seen_count</strong><span>idempotency counter</span></li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="guardrails-title">
+        <h2 id="guardrails-title">Guardrails For The Slice</h2>
+        <div class="rules">
+          <article class="rule">
+            <h3>No placeholder commands</h3>
+            <p>Only <code>import</code> is exposed. <code>build-tree</code>, <code>gc</code>, and <code>audit</code> remain future work.</p>
+          </article>
+          <article class="rule">
+            <h3>No ORM</h3>
+            <p>SQLite is accessed through raw SQL behind catalog APIs, with visible schema and migration behavior.</p>
+          </article>
+          <article class="rule">
+            <h3>No broad concurrency yet</h3>
+            <p>Workers, single-writer batching, managed checkpoints, progress dashboards, and metadata-skip optimization are deferred.</p>
+          </article>
+        </div>
+      </section>
+
+      <footer>
+        Source of truth: <code>IMPLEMENTATION.md</code>, <code>SPEC.md</code>,
+        <code>RUST-ARCHITECTURE.instructions.md</code>, and <code>SQLITE.instructions.md</code>.
+      </footer>
+    </main>
+  </body>
+</html>

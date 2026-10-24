@@ -1,0 +1,4 @@
+[workspace]
+members = ["crates/media-importer"]
+resolver = "3"
+

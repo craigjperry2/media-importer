@@ -89,6 +89,21 @@ green step must preserve.
 
 # Delegation
 
-After the tests are written and failing for the intended reason, delegate to
-`tdd-judge` with the full handoff. If delegation is unavailable, return only the
-handoff.
+After the tests are written and failing for the intended reason:
+
+- Delegate to `tdd-judge` in the **foreground**. Do **not** use a background task
+  or a background agent.
+- Give `tdd-judge` a self-contained prompt so it can work in a fresh context
+  window without reconstructing prior steps.
+- Use this delegation payload format:
+
+  ```text
+  You are `tdd-judge`. Review the completed `tdd-red` stage below in the
+  foreground. Verify it against the repository, then continue the loop in the
+  foreground according to its routing fields.
+
+  [paste the full handoff verbatim]
+  ```
+
+- If foreground delegation is unavailable, return only the handoff so the caller
+  can pass it on manually without losing context.

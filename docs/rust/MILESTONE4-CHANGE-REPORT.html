@@ -1,0 +1,1795 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="An illustrated change report and knowledge check for Media Importer Milestone 4 garbage collection."
+    />
+    <title>Media Importer — Milestone 4 Change Report</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #17212b;
+        --muted: #5d6b75;
+        --paper: #f4f2eb;
+        --surface: #fffdf8;
+        --surface-strong: #ffffff;
+        --line: #d8d4c9;
+        --navy: #1d3647;
+        --teal: #177b78;
+        --teal-soft: #e5f2ef;
+        --amber: #bd7029;
+        --amber-soft: #fff1df;
+        --red: #a3423d;
+        --red-soft: #fbeae7;
+        --green: #397049;
+        --green-soft: #e9f4eb;
+        --purple: #67568d;
+        --purple-soft: #eeeaf7;
+        --shadow: 0 18px 50px rgba(31, 44, 51, 0.09);
+        --radius: 16px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 8% 2%, rgba(23, 123, 120, 0.11), transparent 29rem),
+          radial-gradient(circle at 93% 12%, rgba(189, 112, 41, 0.1), transparent 32rem),
+          linear-gradient(180deg, #fbfaf5, var(--paper));
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        line-height: 1.65;
+      }
+
+      a {
+        color: var(--teal);
+        text-underline-offset: 3px;
+      }
+
+      a:hover {
+        color: #105d5b;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      .scroll-progress {
+        position: fixed;
+        z-index: 100;
+        top: 0;
+        left: 0;
+        width: 0;
+        height: 4px;
+        background: linear-gradient(90deg, var(--teal), var(--amber));
+      }
+
+      .page {
+        width: min(1280px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 44px 0 80px;
+      }
+
+      .hero {
+        position: relative;
+        display: grid;
+        grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.7fr);
+        gap: 34px;
+        align-items: end;
+        overflow: hidden;
+        padding: clamp(28px, 5vw, 64px);
+        border: 1px solid rgba(29, 54, 71, 0.16);
+        border-radius: 24px;
+        background:
+          linear-gradient(135deg, rgba(255, 255, 255, 0.94), rgba(247, 248, 241, 0.9)),
+          var(--surface);
+        box-shadow: var(--shadow);
+      }
+
+      .hero::after {
+        position: absolute;
+        top: -80px;
+        right: -60px;
+        width: 270px;
+        height: 270px;
+        border: 42px solid rgba(23, 123, 120, 0.08);
+        border-radius: 50%;
+        content: "";
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        gap: 9px;
+        align-items: center;
+        margin-bottom: 18px;
+        color: var(--teal);
+        font-size: 0.78rem;
+        font-weight: 850;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow::before {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--teal);
+        box-shadow: 0 0 0 5px rgba(23, 123, 120, 0.12);
+        content: "";
+      }
+
+      h1,
+      h2,
+      h3,
+      h4,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 850px;
+        margin-bottom: 18px;
+        color: var(--navy);
+        font-size: clamp(2.55rem, 6vw, 5.6rem);
+        line-height: 0.97;
+        letter-spacing: -0.045em;
+      }
+
+      h2 {
+        margin-bottom: 14px;
+        color: var(--navy);
+        font-size: clamp(1.7rem, 3vw, 2.65rem);
+        line-height: 1.08;
+        letter-spacing: -0.025em;
+      }
+
+      h3 {
+        margin-bottom: 8px;
+        color: var(--navy);
+        font-size: 1.12rem;
+        line-height: 1.3;
+      }
+
+      h4 {
+        margin-bottom: 6px;
+        color: var(--navy);
+        font-size: 0.95rem;
+      }
+
+      p,
+      li {
+        color: var(--muted);
+      }
+
+      .lead {
+        max-width: 800px;
+        margin-bottom: 0;
+        color: #41535f;
+        font-size: clamp(1.04rem, 1.8vw, 1.28rem);
+      }
+
+      .hero-aside {
+        position: relative;
+        z-index: 1;
+        padding: 22px;
+        border: 1px solid rgba(29, 54, 71, 0.12);
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.8);
+      }
+
+      .hero-aside strong {
+        display: block;
+        margin-bottom: 8px;
+        color: var(--navy);
+        font-size: 1.05rem;
+      }
+
+      .hero-aside p {
+        margin-bottom: 12px;
+        font-size: 0.92rem;
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        min-height: 30px;
+        padding: 5px 10px;
+        border: 1px solid #cbded9;
+        border-radius: 999px;
+        background: var(--teal-soft);
+        color: #195f5d;
+        font-size: 0.76rem;
+        font-weight: 760;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 230px minmax(0, 1fr);
+        gap: 28px;
+        align-items: start;
+        margin-top: 28px;
+      }
+
+      .toc {
+        position: sticky;
+        top: 22px;
+        padding: 18px;
+        border: 1px solid rgba(29, 54, 71, 0.12);
+        border-radius: 14px;
+        background: rgba(255, 253, 248, 0.86);
+        box-shadow: 0 10px 30px rgba(31, 44, 51, 0.06);
+        backdrop-filter: blur(12px);
+      }
+
+      .toc strong {
+        display: block;
+        margin-bottom: 10px;
+        color: var(--navy);
+        font-size: 0.78rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .toc a {
+        display: block;
+        margin: 2px 0;
+        padding: 6px 8px;
+        border-radius: 7px;
+        color: #63727c;
+        font-size: 0.82rem;
+        text-decoration: none;
+      }
+
+      .toc a:hover,
+      .toc a.active {
+        background: var(--teal-soft);
+        color: #155d5a;
+      }
+
+      .toc .quiz-link {
+        margin-top: 8px;
+        border: 1px solid #e4c49f;
+        background: var(--amber-soft);
+        color: #874b16;
+        font-weight: 800;
+      }
+
+      .content {
+        min-width: 0;
+      }
+
+      .section {
+        scroll-margin-top: 18px;
+        margin-bottom: 22px;
+        padding: clamp(24px, 4vw, 42px);
+        border: 1px solid rgba(29, 54, 71, 0.1);
+        border-radius: var(--radius);
+        background: rgba(255, 253, 248, 0.88);
+        box-shadow: 0 12px 38px rgba(31, 44, 51, 0.065);
+      }
+
+      .section-intro {
+        max-width: 850px;
+        margin-bottom: 24px;
+        font-size: 1.02rem;
+      }
+
+      .callout {
+        margin: 22px 0;
+        padding: 18px 20px;
+        border-left: 5px solid var(--teal);
+        border-radius: 0 10px 10px 0;
+        background: var(--teal-soft);
+      }
+
+      .callout.warning {
+        border-left-color: var(--amber);
+        background: var(--amber-soft);
+      }
+
+      .callout.danger {
+        border-left-color: var(--red);
+        background: var(--red-soft);
+      }
+
+      .callout p:last-child,
+      .callout ul:last-child {
+        margin-bottom: 0;
+      }
+
+      .callout strong {
+        color: var(--navy);
+      }
+
+      .grid-2,
+      .grid-3,
+      .grid-4 {
+        display: grid;
+        gap: 15px;
+      }
+
+      .grid-2 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .grid-3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .grid-4 {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .card {
+        padding: 19px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface-strong);
+      }
+
+      .card p:last-child,
+      .card ul:last-child {
+        margin-bottom: 0;
+      }
+
+      .card .number {
+        display: inline-grid;
+        place-items: center;
+        width: 30px;
+        height: 30px;
+        margin-bottom: 12px;
+        border-radius: 9px;
+        background: var(--navy);
+        color: #fff;
+        font-size: 0.78rem;
+        font-weight: 850;
+      }
+
+      .card.teal {
+        border-top: 4px solid var(--teal);
+      }
+
+      .card.amber {
+        border-top: 4px solid var(--amber);
+      }
+
+      .card.purple {
+        border-top: 4px solid var(--purple);
+      }
+
+      .card.green {
+        border-top: 4px solid var(--green);
+      }
+
+      .before-after {
+        display: grid;
+        grid-template-columns: 1fr auto 1fr;
+        gap: 15px;
+        align-items: stretch;
+      }
+
+      .before-after .arrow {
+        display: grid;
+        place-items: center;
+        color: var(--amber);
+        font-size: 2rem;
+        font-weight: 900;
+      }
+
+      .state-table,
+      .comparison-table {
+        width: 100%;
+        border-collapse: collapse;
+        border: 1px solid var(--line);
+        background: #fff;
+        font-size: 0.91rem;
+      }
+
+      .state-table th,
+      .state-table td,
+      .comparison-table th,
+      .comparison-table td {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .state-table th,
+      .comparison-table th {
+        background: #eff2ec;
+        color: var(--navy);
+        font-size: 0.78rem;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .state-table tr:last-child td,
+      .comparison-table tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .action {
+        display: inline-block;
+        padding: 3px 8px;
+        border-radius: 999px;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 0.78rem;
+        font-weight: 800;
+      }
+
+      .action.mark {
+        background: var(--amber-soft);
+        color: #874b16;
+      }
+
+      .action.resurrect {
+        background: var(--purple-soft);
+        color: #534276;
+      }
+
+      .action.sweep {
+        background: var(--red-soft);
+        color: #843932;
+      }
+
+      .action.unchanged {
+        background: var(--green-soft);
+        color: #315f3d;
+      }
+
+      .timeline {
+        display: grid;
+        grid-template-columns: 1fr 42px 1fr 42px 1fr;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .timeline-step {
+        min-height: 150px;
+        padding: 17px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #fff;
+      }
+
+      .timeline-arrow {
+        color: var(--teal);
+        font-size: 1.7rem;
+        font-weight: 900;
+        text-align: center;
+      }
+
+      .timeline-step small {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--teal);
+        font-weight: 850;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .pipeline {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        counter-reset: pipeline;
+      }
+
+      .pipeline-item {
+        position: relative;
+        min-height: 145px;
+        padding: 42px 16px 16px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #fff;
+      }
+
+      .pipeline-item::before {
+        position: absolute;
+        top: 13px;
+        left: 15px;
+        display: grid;
+        place-items: center;
+        width: 23px;
+        height: 23px;
+        border-radius: 7px;
+        background: var(--navy);
+        color: #fff;
+        content: counter(pipeline);
+        counter-increment: pipeline;
+        font-size: 0.72rem;
+        font-weight: 850;
+      }
+
+      .pipeline-item strong {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--navy);
+      }
+
+      .pipeline-item p {
+        margin-bottom: 0;
+        font-size: 0.86rem;
+      }
+
+      pre {
+        margin: 18px 0 0;
+        padding: 18px;
+        overflow-x: auto;
+        border: 1px solid #d7ddd6;
+        border-radius: 11px;
+        background: #182932;
+        color: #dceae6;
+        font: 0.84rem/1.6 "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      }
+
+      code {
+        padding: 0.12rem 0.32rem;
+        border: 1px solid #dce2da;
+        border-radius: 5px;
+        background: #f1f4ef;
+        color: #24353f;
+        font-size: 0.9em;
+      }
+
+      pre code {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: inherit;
+      }
+
+      .file-map {
+        display: grid;
+        gap: 10px;
+      }
+
+      .file-row {
+        display: grid;
+        grid-template-columns: minmax(200px, 0.65fr) minmax(0, 1.35fr);
+        gap: 16px;
+        padding: 14px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .file-row:last-child {
+        border-bottom: 0;
+      }
+
+      .file-row a {
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 0.82rem;
+        font-weight: 760;
+      }
+
+      .file-row p {
+        margin-bottom: 0;
+        font-size: 0.9rem;
+      }
+
+      .metric-row {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+        margin: 22px 0;
+      }
+
+      .metric {
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #fff;
+      }
+
+      .metric strong {
+        display: block;
+        color: var(--navy);
+        font-size: 1.45rem;
+        line-height: 1.1;
+      }
+
+      .metric span {
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+
+      .check-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px 18px;
+        padding: 0;
+        list-style: none;
+      }
+
+      .check-list li {
+        position: relative;
+        padding-left: 28px;
+      }
+
+      .check-list li::before {
+        position: absolute;
+        top: 0.15rem;
+        left: 0;
+        display: grid;
+        place-items: center;
+        width: 19px;
+        height: 19px;
+        border-radius: 50%;
+        background: var(--green-soft);
+        color: var(--green);
+        content: "✓";
+        font-size: 0.72rem;
+        font-weight: 900;
+      }
+
+      .quiz-section {
+        border: 2px solid rgba(189, 112, 41, 0.32);
+        background:
+          radial-gradient(circle at 95% 3%, rgba(189, 112, 41, 0.12), transparent 22rem),
+          rgba(255, 253, 248, 0.95);
+      }
+
+      .quiz-header {
+        display: flex;
+        gap: 20px;
+        align-items: start;
+        justify-content: space-between;
+        margin-bottom: 20px;
+      }
+
+      .pass-rule {
+        min-width: 190px;
+        padding: 13px 16px;
+        border: 1px solid #e2c099;
+        border-radius: 11px;
+        background: var(--amber-soft);
+        color: #7b4517;
+        font-size: 0.84rem;
+        font-weight: 800;
+        text-align: center;
+      }
+
+      .best-score {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 0.76rem;
+        font-weight: 600;
+      }
+
+      .question {
+        margin: 0 0 14px;
+        padding: 18px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #fff;
+      }
+
+      .question.correct {
+        border-color: #9bc5a5;
+        background: #fbfffb;
+      }
+
+      .question.incorrect {
+        border-color: #d7a49f;
+        background: #fffafa;
+      }
+
+      .question legend {
+        max-width: 95%;
+        padding: 0 7px;
+        color: var(--navy);
+        font-weight: 780;
+      }
+
+      .option {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        margin: 8px 0;
+        padding: 9px 11px;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        cursor: pointer;
+      }
+
+      .option:hover {
+        border-color: #d7dfd7;
+        background: #f7f9f5;
+      }
+
+      .option input {
+        margin-top: 5px;
+        accent-color: var(--teal);
+      }
+
+      .explanation {
+        display: none;
+        margin: 12px 0 0;
+        padding-top: 11px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.88rem;
+      }
+
+      .question.graded .explanation {
+        display: block;
+      }
+
+      .quiz-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        margin-top: 20px;
+      }
+
+      .button {
+        min-height: 44px;
+        padding: 10px 18px;
+        border: 0;
+        border-radius: 9px;
+        background: var(--navy);
+        color: #fff;
+        font-weight: 790;
+        cursor: pointer;
+      }
+
+      .button:hover {
+        background: #294b60;
+      }
+
+      .button.secondary {
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--navy);
+      }
+
+      .quiz-result {
+        display: none;
+        margin-top: 18px;
+        padding: 20px;
+        border-radius: 12px;
+      }
+
+      .quiz-result.show {
+        display: block;
+      }
+
+      .quiz-result.pass {
+        border: 1px solid #94bf9f;
+        background: var(--green-soft);
+      }
+
+      .quiz-result.fail {
+        border: 1px solid #dda69e;
+        background: var(--red-soft);
+      }
+
+      .quiz-result strong {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--navy);
+        font-size: 1.2rem;
+      }
+
+      .footer-note {
+        margin: 25px 0 0;
+        color: #77838b;
+        font-size: 0.82rem;
+        text-align: center;
+      }
+
+      @media (max-width: 980px) {
+        .hero,
+        .layout {
+          grid-template-columns: 1fr;
+        }
+
+        .toc {
+          position: static;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 3px;
+        }
+
+        .toc strong {
+          width: 100%;
+        }
+
+        .toc a {
+          display: inline-block;
+        }
+
+        .pipeline,
+        .grid-4,
+        .metric-row {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .grid-3 {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 680px) {
+        .page {
+          width: min(100% - 20px, 1280px);
+          padding-top: 20px;
+        }
+
+        .hero {
+          padding: 25px 20px;
+        }
+
+        .section {
+          padding: 23px 18px;
+        }
+
+        .grid-2,
+        .grid-4,
+        .pipeline,
+        .metric-row,
+        .check-list {
+          grid-template-columns: 1fr;
+        }
+
+        .before-after {
+          grid-template-columns: 1fr;
+        }
+
+        .before-after .arrow {
+          transform: rotate(90deg);
+        }
+
+        .timeline {
+          grid-template-columns: 1fr;
+        }
+
+        .timeline-arrow {
+          transform: rotate(90deg);
+        }
+
+        .file-row {
+          grid-template-columns: 1fr;
+          gap: 6px;
+        }
+
+        .quiz-header {
+          display: block;
+        }
+
+        .pass-rule {
+          margin-top: 14px;
+        }
+      }
+
+      @media print {
+        body {
+          background: #fff;
+        }
+
+        .scroll-progress,
+        .toc,
+        .quiz-actions {
+          display: none;
+        }
+
+        .page {
+          width: 100%;
+          padding: 0;
+        }
+
+        .hero,
+        .section {
+          break-inside: avoid;
+          box-shadow: none;
+        }
+
+        .layout {
+          display: block;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="scroll-progress" id="scroll-progress" aria-hidden="true"></div>
+    <main class="page">
+      <header class="hero">
+        <div>
+          <div class="eyebrow">Change report · Rust rewrite · Milestone 4</div>
+          <h1>Garbage collection, made deliberately boring.</h1>
+          <p class="lead">
+            This change adds explicit two-run mark-and-sweep garbage collection to Media
+            Importer. The design is conservative: the catalog decides what is live, every
+            deletion candidate is verified before mutation, and uncertainty blocks deletion.
+          </p>
+        </div>
+        <aside class="hero-aside" aria-label="Report summary">
+          <strong>What you should know after reading</strong>
+          <p>
+            Why collection takes two committed transitions, how reachability is calculated,
+            what dry-run really does, how crash recovery works, and where the safety boundary
+            still depends on operator discipline.
+          </p>
+          <div class="chips">
+            <span class="chip">New <code>gc</code> command</span>
+            <span class="chip">No schema migration</span>
+            <span class="chip">Candidate rehashing</span>
+            <span class="chip">Partial recovery</span>
+            <span class="chip">60 tests passing</span>
+          </div>
+        </aside>
+      </header>
+
+      <div class="layout">
+        <nav class="toc" aria-label="Report contents">
+          <strong>Contents</strong>
+          <a href="#executive-summary">1. Executive summary</a>
+          <a href="#mental-model">2. Mental model</a>
+          <a href="#state-machine">3. State machine</a>
+          <a href="#execution-flow">4. Execution flow</a>
+          <a href="#catalog-safety">5. Catalog safety</a>
+          <a href="#filesystem-safety">6. Filesystem safety</a>
+          <a href="#failure-recovery">7. Failure &amp; recovery</a>
+          <a href="#import-resurrection">8. Import resurrection</a>
+          <a href="#cli-output">9. CLI &amp; outcomes</a>
+          <a href="#code-tour">10. Code tour</a>
+          <a href="#tests">11. Test evidence</a>
+          <a href="#boundaries">12. Boundaries</a>
+          <a class="quiz-link" href="#quiz">Required quiz</a>
+        </nav>
+
+        <article class="content">
+          <section class="section" id="executive-summary">
+            <div class="eyebrow">The outcome</div>
+            <h2>From “we can detect garbage” to “we can remove it safely.”</h2>
+            <p class="section-intro">
+              Before this change, imports could leave old blobs unreferenced and audit could
+              report integrity, but there was no supported path for reclaiming those blobs.
+              Milestone 4 closes that loop with a narrow <code>gc</code> operation.
+            </p>
+
+            <div class="before-after">
+              <div class="card amber">
+                <h3>Before</h3>
+                <ul>
+                  <li><code>import</code>, <code>build-tree</code>, and <code>audit</code>.</li>
+                  <li><code>deleted_at_ms</code> existed but had no complete lifecycle.</li>
+                  <li>Audit could count marked candidates, never remove them.</li>
+                  <li>Re-importing a marked blob could leave it hidden.</li>
+                </ul>
+              </div>
+              <div class="arrow" aria-hidden="true">→</div>
+              <div class="card teal">
+                <h3>After</h3>
+                <ul>
+                  <li>A real and dry-run <code>gc</code> command.</li>
+                  <li>Fixed mark, resurrect, sweep, and unchanged classifications.</li>
+                  <li>Full integrity preflight before the first mutation.</li>
+                  <li>Crash-resumable file-first deletion and atomic resurrection.</li>
+                </ul>
+              </div>
+            </div>
+
+            <div class="callout">
+              <strong>The core design choice:</strong>
+              <p>
+                GC prefers a false negative (refuse to delete when anything looks wrong) over a
+                false positive (delete content that might still matter). Findings are therefore
+                blockers, not warnings that GC works around.
+              </p>
+            </div>
+
+            <div class="metric-row" aria-label="Change summary metrics">
+              <div class="metric"><strong>4</strong><span>CLI commands now exposed</span></div>
+              <div class="metric"><strong>2</strong><span>Committed transitions before removal</span></div>
+              <div class="metric"><strong>3</strong><span>Process outcome classes</span></div>
+              <div class="metric"><strong>60</strong><span>Workspace tests passing</span></div>
+            </div>
+          </section>
+
+          <section class="section" id="mental-model">
+            <div class="eyebrow">Start here</div>
+            <h2>The catalog holds the roots; the CAS holds the bodies.</h2>
+            <p class="section-intro">
+              The easiest way to understand the implementation is to separate durable meaning
+              from stored bytes.
+            </p>
+            <div class="grid-3">
+              <div class="card teal">
+                <h3><code>source_files</code> = reachability roots</h3>
+                <p>
+                  A blob is live when at least one catalog source record points to it. GC does
+                  not inspect whether that original source path still exists on a disk.
+                </p>
+              </div>
+              <div class="card purple">
+                <h3><code>blobs</code> = lifecycle state</h3>
+                <p>
+                  Each blob row carries identity, logical size, creation time, and the nullable
+                  <code>deleted_at_ms</code> mark.
+                </p>
+              </div>
+              <div class="card amber">
+                <h3>CAS files = immutable content</h3>
+                <p>
+                  Files live at canonical hash-derived paths. A CAS file with no valid catalog
+                  row is an orphan and is never silently adopted or deleted by GC.
+                </p>
+              </div>
+            </div>
+
+            <div class="callout warning">
+              <strong>A common misconception:</strong>
+              <p>
+                Removing a file from the original source disk does not make its blob
+                unreachable. Only changing durable catalog references does that. Likewise, a
+                browse-tree symlink is an output view, not a reachability root.
+              </p>
+            </div>
+          </section>
+
+          <section class="section" id="state-machine">
+            <div class="eyebrow">The fixed plan</div>
+            <h2>Four run-start states, exactly four decisions.</h2>
+            <p class="section-intro">
+              GC takes one authoritative snapshot and classifies every valid blob row from that
+              snapshot. It does not reclassify rows after marks begin.
+            </p>
+
+            <div style="overflow-x: auto">
+              <table class="state-table">
+                <thead>
+                  <tr>
+                    <th>Referenced?</th>
+                    <th>Already marked?</th>
+                    <th>Action</th>
+                    <th>Intuition</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Yes</td>
+                    <td>No</td>
+                    <td><span class="action unchanged">UNCHANGED</span></td>
+                    <td>Normal live content; nothing to do.</td>
+                  </tr>
+                  <tr>
+                    <td>Yes</td>
+                    <td>Yes</td>
+                    <td><span class="action resurrect">RESURRECT</span></td>
+                    <td>A live reference wins; clear the stale deletion mark.</td>
+                  </tr>
+                  <tr>
+                    <td>No</td>
+                    <td>No</td>
+                    <td><span class="action mark">MARK</span></td>
+                    <td>Record the first committed transition, but keep the bytes.</td>
+                  </tr>
+                  <tr>
+                    <td>No</td>
+                    <td>Yes</td>
+                    <td><span class="action sweep">SWEEP</span></td>
+                    <td>It was already marked before this run and remains unreachable.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h3 style="margin-top: 28px">Why two runs?</h3>
+            <div class="timeline">
+              <div class="timeline-step">
+                <small>Run start</small>
+                <h3>Unreachable, unmarked</h3>
+                <p>The blob is classified once as <code>MARK</code>.</p>
+              </div>
+              <div class="timeline-arrow" aria-hidden="true">→</div>
+              <div class="timeline-step">
+                <small>Commit 1</small>
+                <h3>Mark becomes durable</h3>
+                <p>The CAS file and catalog row remain. This is the grace boundary.</p>
+              </div>
+              <div class="timeline-arrow" aria-hidden="true">→</div>
+              <div class="timeline-step">
+                <small>Later invocation</small>
+                <h3>Still unreachable, already marked</h3>
+                <p>Only now can it enter the <code>SWEEP</code> set.</p>
+              </div>
+            </div>
+
+            <div class="callout">
+              <strong>Subtle but important:</strong>
+              <p>
+                The boundary is committed state, not “two exit-code-0 processes.” If a mark
+                commits during an invocation that later exits 1 because another sweep failed,
+                that mark still counts as the earlier transition.
+              </p>
+            </div>
+          </section>
+
+          <section class="section" id="execution-flow">
+            <div class="eyebrow">One deep operation</div>
+            <h2>Plan everything. Prove safety. Then mutate.</h2>
+            <p class="section-intro">
+              <code>collect_garbage(config)</code> hides the catalog transaction, CAS traversal,
+              hashing, deletion, accounting, and recovery choreography behind one behavior-level
+              API.
+            </p>
+
+            <div class="pipeline">
+              <div class="pipeline-item">
+                <strong>Validate paths</strong>
+                <p>Store, blobs directory, and catalog must already be real, non-symlink objects.</p>
+              </div>
+              <div class="pipeline-item">
+                <strong>Open catalog</strong>
+                <p>Dry-run uses direct read-only access. Real GC reserves an immediate transaction.</p>
+              </div>
+              <div class="pipeline-item">
+                <strong>Inspect catalog</strong>
+                <p>Check integrity, foreign keys, schema shape, domain rows, and reachability.</p>
+              </div>
+              <div class="pipeline-item">
+                <strong>Freeze the plan</strong>
+                <p>Sort marks, resurrections, and sweeps by full validated blob hash.</p>
+              </div>
+              <div class="pipeline-item">
+                <strong>Walk the CAS</strong>
+                <p>Classify every entry without following symlinks and build a valid membership index.</p>
+              </div>
+              <div class="pipeline-item">
+                <strong>Reconcile &amp; hash</strong>
+                <p>Compare membership and sizes; fully hash present run-start sweep candidates.</p>
+              </div>
+              <div class="pipeline-item">
+                <strong>Block or apply</strong>
+                <p>Any finding blocks all mutation. A clean real run stages catalog changes and deletes.</p>
+              </div>
+              <div class="pipeline-item">
+                <strong>Commit &amp; report</strong>
+                <p>Only durably known catalog actions become completed action lines.</p>
+              </div>
+            </div>
+
+            <h3 style="margin-top: 28px">Dry-run is real work without durable change</h3>
+            <div style="overflow-x: auto">
+              <table class="comparison-table">
+                <thead>
+                  <tr><th>Behavior</th><th>Dry-run</th><th>Real run</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>Read and validate schema/catalog</td><td>Yes</td><td>Yes</td></tr>
+                  <tr><td>Walk and classify the complete CAS</td><td>Yes</td><td>Yes</td></tr>
+                  <tr><td>Fully hash present sweep candidates</td><td>Yes</td><td>Yes</td></tr>
+                  <tr><td>Plan mark/resurrect/sweep actions</td><td><code>WOULD_*</code></td><td>Applied after preflight</td></tr>
+                  <tr><td>Create/mutate DB, WAL, SHM, CAS, staging</td><td>No</td><td>As required</td></tr>
+                  <tr><td>Need wall-clock timestamp</td><td>No</td><td>One fixed value for all marks</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="section" id="catalog-safety">
+            <div class="eyebrow">SQLite side</div>
+            <h2>The catalog snapshot stays authoritative for the whole real run.</h2>
+            <div class="grid-2">
+              <div>
+                <h3>Purpose-specific open policy</h3>
+                <ul>
+                  <li>Read/write and <code>NOFOLLOW</code>, but never <code>CREATE</code>.</li>
+                  <li>Schema version must be exactly 1.</li>
+                  <li>Journal mode must already be WAL; GC will not convert it.</li>
+                  <li><code>foreign_keys=ON</code> and <code>synchronous=NORMAL</code>.</li>
+                  <li>A short busy timeout; inability to reserve is an operational failure.</li>
+                </ul>
+              </div>
+              <div>
+                <h3>Immediate transaction</h3>
+                <ul>
+                  <li>Begins before the authoritative reachability query.</li>
+                  <li>Schema version is checked again inside the transaction.</li>
+                  <li>The same transaction owns the snapshot and every staged mutation.</li>
+                  <li>Each defensive update/delete must affect exactly one row.</li>
+                </ul>
+              </div>
+            </div>
+
+            <pre><code>SELECT blob identity, size, mark,
+       EXISTS(source_files reference) AS referenced
+FROM blobs
+ORDER BY full_hash;
+
+-- Every mutation repeats its safety predicate:
+MARK      only when unmarked AND unreferenced
+RESURRECT only when marked   AND referenced
+SWEEP     only when marked   AND unreferenced</code></pre>
+
+            <div class="callout">
+              <strong>Why repeat predicates after holding a write reservation?</strong>
+              <p>
+                The reservation should prevent ordinary catalog writers from changing the plan,
+                but the predicates make assumptions executable. A zero-row result is treated as
+                an operational failure rather than silently claiming success.
+              </p>
+            </div>
+          </section>
+
+          <section class="section" id="filesystem-safety">
+            <div class="eyebrow">CAS side</div>
+            <h2>A hash-looking path is not enough evidence to unlink a file.</h2>
+            <p class="section-intro">
+              Each present sweep candidate goes through two identity checks: one while hashing
+              and one immediately before removal.
+            </p>
+
+            <div class="grid-4">
+              <div class="card teal">
+                <span class="number">1</span>
+                <h3>Canonical path</h3>
+                <p>The deletion path is derived only from <code>StoreRoot + BlobHash</code>.</p>
+              </div>
+              <div class="card purple">
+                <span class="number">2</span>
+                <h3>No-follow open</h3>
+                <p>The final component opens read-only with platform <code>libc::O_NOFOLLOW</code>.</p>
+              </div>
+              <div class="card amber">
+                <span class="number">3</span>
+                <h3>Hash &amp; identity</h3>
+                <p>Stream BLAKE3 and record length, device, and inode from the opened file.</p>
+              </div>
+              <div class="card green">
+                <span class="number">4</span>
+                <h3>Revalidate</h3>
+                <p>Immediately before unlink, require the same type, length, device, and inode.</p>
+              </div>
+            </div>
+
+            <h3 style="margin-top: 28px">Durability order for a present candidate</h3>
+            <pre><code>revalidate canonical path
+    → unlink CAS file
+    → fsync containing shard directory
+    → stage defensive catalog delete
+    → commit SQLite transaction</code></pre>
+
+            <p>
+              Empty shard directories are intentionally retained. GC never chmods a candidate
+              merely to remove it, and it never uses a raw path discovered during traversal as a
+              deletion target.
+            </p>
+
+            <div class="callout danger">
+              <strong>This narrows races; it does not defeat an adversarial filesystem writer.</strong>
+              <p>
+                A final-component replacement after revalidation or a parent-directory
+                replacement remains outside the guarantee. This is why quiescence is a hard
+                precondition, not just performance advice.
+              </p>
+            </div>
+          </section>
+
+          <section class="section" id="failure-recovery">
+            <div class="eyebrow">Partial failure semantics</div>
+            <h2>Filesystem and SQLite cannot share one atomic commit.</h2>
+            <p class="section-intro">
+              The implementation uses file-first ordering because leaving a marked catalog row
+              with a missing file is recoverable. Deleting the row first and retaining an
+              untracked file would create an orphan.
+            </p>
+
+            <div style="overflow-x: auto">
+              <table class="comparison-table">
+                <thead>
+                  <tr><th>Failure point</th><th>What happens now</th><th>What the report may claim</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Mark/resurrection SQL</td>
+                    <td>Stop; drop/roll back transaction. No CAS deletion started.</td>
+                    <td>No completed actions.</td>
+                  </tr>
+                  <tr>
+                    <td>Revalidation, unlink, or directory sync</td>
+                    <td>Stop at that candidate; try to commit earlier catalog work.</td>
+                    <td>Only earlier committed actions; physical counters remain separate.</td>
+                  </tr>
+                  <tr>
+                    <td>Catalog delete after unlink</td>
+                    <td>Stop; file may already be absent; commit earlier work if possible.</td>
+                    <td>Failing sweep is not completed. Rerun can recover it.</td>
+                  </tr>
+                  <tr>
+                    <td>Final SQLite commit</td>
+                    <td>Do not guess whether staged changes became durable.</td>
+                    <td>No staged catalog actions as known-complete; retain known unlink progress.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <h3 style="margin-top: 28px">Interrupted sweep recovery</h3>
+            <div class="timeline">
+              <div class="timeline-step">
+                <small>Prior run</small>
+                <h3>File removed</h3>
+                <p>The process stops before its marked catalog row is deleted or committed.</p>
+              </div>
+              <div class="timeline-arrow" aria-hidden="true">→</div>
+              <div class="timeline-step">
+                <small>Next preflight</small>
+                <h3>Exact exception recognized</h3>
+                <p>Marked + unreachable + canonical file absent is not a missing-blob finding.</p>
+              </div>
+              <div class="timeline-arrow" aria-hidden="true">→</div>
+              <div class="timeline-step">
+                <small>Recovery</small>
+                <h3>Logical sweep finishes</h3>
+                <p>Sync nearest existing parent, delete row, report <code>state=already-absent</code>.</p>
+              </div>
+            </div>
+
+            <div class="callout warning">
+              <strong>Accounting stays honest:</strong>
+              <p>
+                <code>bytes_unlinked</code> records successful unlink-plus-directory-sync work in
+                this invocation. <code>bytes_reclaimed</code> counts logical bytes only when the
+                corresponding sweep is known to have committed. Already-absent recovery adds zero
+                to both physical-removal and reclaimed-byte totals.
+              </p>
+            </div>
+          </section>
+
+          <section class="section" id="import-resurrection">
+            <div class="eyebrow">Cross-command fix</div>
+            <h2>Import now atomically brings marked content back to life.</h2>
+            <p class="section-intro">
+              GC resurrection handles a marked row that is already referenced at run start.
+              Import resurrection prevents a successful re-import from creating that stale state
+              in the first place.
+            </p>
+
+            <div class="pipeline" style="grid-template-columns: repeat(5, minmax(0, 1fr))">
+              <div class="pipeline-item"><strong>Insert if absent</strong><p>Ensure the blob row exists.</p></div>
+              <div class="pipeline-item"><strong>Validate size</strong><p>Existing identity must match imported bytes.</p></div>
+              <div class="pipeline-item"><strong>Clear mark</strong><p>Update only the expected hash and size.</p></div>
+              <div class="pipeline-item"><strong>Upsert source</strong><p>Record the durable reachability root.</p></div>
+              <div class="pipeline-item"><strong>Commit once</strong><p>Resurrection and reference appear atomically.</p></div>
+            </div>
+
+            <p style="margin-top: 20px">
+              This also restores <code>build-tree</code> visibility, because materialization reads
+              only blobs whose <code>deleted_at_ms</code> is null.
+            </p>
+          </section>
+
+          <section class="section" id="cli-output">
+            <div class="eyebrow">User-facing contract</div>
+            <h2>The CLI distinguishes clean completion, blocked safety, and incomplete mutation.</h2>
+
+            <pre><code>media-importer gc \
+  --store STORE_ROOT \
+  [--db DB_PATH] \
+  [--dry-run] \
+  [--chunk-size BYTES]</code></pre>
+
+            <div class="grid-3" style="margin-top: 20px">
+              <div class="card green">
+                <h3>Exit 0 · Complete</h3>
+                <p>Clean no-op, marks, resurrections, sweeps, mixed actions, or a clean dry-run.</p>
+              </div>
+              <div class="card amber">
+                <h3>Exit 1 · Operational/incomplete</h3>
+                <p>Invalid paths/configuration, busy SQLite, mutation failure, or failed commit.</p>
+              </div>
+              <div class="card purple">
+                <h3>Exit 2 · Blocked</h3>
+                <p>Preflight finished and found one or more integrity problems. No app/CAS mutation.</p>
+              </div>
+            </div>
+
+            <pre><code>MARK       &lt;64-char-hash&gt; bytes=42
+RESURRECT  &lt;64-char-hash&gt;
+SWEEP      &lt;64-char-hash&gt; bytes=84
+SWEEP      &lt;64-char-hash&gt; bytes=84 state=already-absent
+
+# Dry-run prefixes the same structured plan:
+WOULD_MARK / WOULD_RESURRECT / WOULD_SWEEP</code></pre>
+
+            <p>
+              Actions are ordered by kind (<code>MARK</code>, <code>RESURRECT</code>,
+              <code>SWEEP</code>) and then by full hash. Blocked runs print findings, not planned
+              action lines. Incomplete runs print only actions known to have committed.
+            </p>
+          </section>
+
+          <section class="section" id="code-tour">
+            <div class="eyebrow">Where the work lives</div>
+            <h2>The implementation preserves responsibility boundaries.</h2>
+            <div class="file-map">
+              <div class="file-row">
+                <a href="../../crates/media-importer/src/gc.rs">src/gc.rs</a>
+                <p>Fixed planning, safety reconciliation, candidate selection, apply order, partial outcomes, and fault seam.</p>
+              </div>
+              <div class="file-row">
+                <a href="../../crates/media-importer/src/catalog.rs">src/catalog.rs</a>
+                <p>Read-only GC inspection, WAL-only real open, immediate transaction, defensive mutations, and import resurrection.</p>
+              </div>
+              <div class="file-row">
+                <a href="../../crates/media-importer/src/store.rs">src/store.rs</a>
+                <p>Strict CAS traversal, portable no-follow open, file identity, revalidation, unlink, and directory syncing.</p>
+              </div>
+              <div class="file-row">
+                <a href="../../crates/media-importer/src/integrity.rs">src/integrity.rs</a>
+                <p>Shared stable finding identities, path escaping, checked growth, sorting, and deduplication for audit and GC.</p>
+              </div>
+              <div class="file-row">
+                <a href="../../crates/media-importer/src/audit.rs">src/audit.rs</a>
+                <p>Refactored to reuse shared integrity/CAS inspection while retaining full-store rehash behavior.</p>
+              </div>
+              <div class="file-row">
+                <a href="../../crates/media-importer/src/cli.rs">src/cli.rs</a>
+                <p>Clap surface, help contract, deterministic action/finding rendering, and complete/blocked/incomplete summaries.</p>
+              </div>
+              <div class="file-row">
+                <a href="../../crates/media-importer/src/config.rs">src/config.rs</a>
+                <p><code>GcOptions → GcConfig</code> conversion and shared existing store/catalog validation.</p>
+              </div>
+              <div class="file-row">
+                <a href="../../crates/media-importer/src/catalog/sql/gc_snapshot.sql">catalog/sql/gc_*.sql</a>
+                <p>Deterministic reachability snapshot plus purpose-specific mark, resurrect, and sweep predicates.</p>
+              </div>
+              <div class="file-row">
+                <a href="../../crates/media-importer/tests/gc_milestone.rs">tests/gc_milestone.rs</a>
+                <p>CLI-level behavior tests for lifecycle, dry-run, resurrection, corruption blocking, WAL policy, ordering, and recovery.</p>
+              </div>
+              <div class="file-row">
+                <a href="../../README.md">README.md</a>
+                <p>Operator-facing contract: reachability, two-run semantics, quiescence, recovery, bytes, shards, and exit statuses.</p>
+              </div>
+            </div>
+          </section>
+
+          <section class="section" id="tests">
+            <div class="eyebrow">Evidence</div>
+            <h2>The tests focus on outcomes, not private choreography.</h2>
+            <p class="section-intro">
+              Tiny real stores and real SQLite catalogs exercise the command boundary. A narrow
+              injected store mutator covers the mutation failure that is difficult to reproduce
+              reliably with the host filesystem.
+            </p>
+
+            <ul class="check-list">
+              <li>First run marks; second run sweeps without a time delay.</li>
+              <li>Repeated dry-runs produce the same plan and preserve durable bytes.</li>
+              <li>Prior-mark candidates hash correctly across multiple chunks.</li>
+              <li>All new marks share one injected clock value.</li>
+              <li>GC and import both resurrect referenced content.</li>
+              <li>Re-import restores build-tree visibility.</li>
+              <li>Orphans and candidate hash mismatches block all mutation.</li>
+              <li>Same-size corruption in a non-candidate is not rehashed by GC.</li>
+              <li>Interrupted missing-file sweeps finalize with zero reclaimed bytes.</li>
+              <li>Real GC rejects non-WAL catalogs without converting them.</li>
+              <li>Injected second deletion failure stops later work and commits earlier work.</li>
+              <li>A later invocation completes the remaining marked candidate.</li>
+            </ul>
+
+            <div class="callout">
+              <strong>Final verification:</strong>
+              <p>
+                Formatting, Clippy with warnings denied, all 60 workspace tests, all pre-commit
+                hooks, and whitespace checks passed.
+              </p>
+            </div>
+          </section>
+
+          <section class="section" id="boundaries">
+            <div class="eyebrow">What this does not claim</div>
+            <h2>The change is safe within a deliberately narrow operating envelope.</h2>
+            <div class="grid-2">
+              <div class="card amber">
+                <h3>Hard precondition</h3>
+                <p>
+                  The selected store and catalog must stay quiescent from validation until
+                  command return. Do not run import, another GC, or external catalog/CAS writers
+                  concurrently.
+                </p>
+              </div>
+              <div class="card purple">
+                <h3>Logical, not physical, bytes</h3>
+                <p>
+                  “Bytes reclaimed” sums cataloged logical sizes. ZFS compression, snapshots,
+                  deduplication, sparse allocation, reflinks, and hard links can change physical
+                  space recovery.
+                </p>
+              </div>
+            </div>
+
+            <h3 style="margin-top: 26px">Deliberately deferred</h3>
+            <ul class="check-list">
+              <li>Catalog-backed cross-command run locking.</li>
+              <li>Source-record pruning based on current source disks.</li>
+              <li>Orphan repair, adoption, quarantine, or deletion.</li>
+              <li>Time-based grace periods and retention configuration.</li>
+              <li>Relationship-aware reachability roots.</li>
+              <li>Directory-descriptor-relative unlinking.</li>
+              <li>Globally atomic filesystem/SQLite mutation.</li>
+              <li>JSON output, progress dashboards, and parallel hashing.</li>
+            </ul>
+
+            <div class="callout warning">
+              <strong>Practical runbook:</strong>
+              <p>
+                Keep the store quiet, run <code>gc --dry-run</code>, resolve every finding, then
+                run real GC. After collection, rerun <code>build-tree</code> if you maintain a
+                materialized browse view, because old links may now be stale.
+              </p>
+            </div>
+          </section>
+
+          <section class="section quiz-section" id="quiz">
+            <div class="quiz-header">
+              <div>
+                <div class="eyebrow">Required knowledge check</div>
+                <h2>Prove you understand the change.</h2>
+                <p>
+                  Answer every question, then grade the quiz. Missed questions reveal an
+                  explanation so you can review and retry.
+                </p>
+              </div>
+              <div class="pass-rule">
+                Pass mark: 10 / 12
+                <div class="best-score" id="best-score">Best score: not attempted</div>
+              </div>
+            </div>
+
+            <form id="quiz-form">
+              <fieldset class="question" data-answer="b">
+                <legend>1. What makes a blob reachable in Milestone 4?</legend>
+                <label class="option"><input type="radio" name="q1" value="a" /> Its original source path currently exists.</label>
+                <label class="option"><input type="radio" name="q1" value="b" /> At least one <code>source_files</code> catalog row references it.</label>
+                <label class="option"><input type="radio" name="q1" value="c" /> A browse-tree symlink points to it.</label>
+                <p class="explanation"><strong>Answer:</strong> Reachability is durable catalog state. Source-disk existence and browse-tree links are not roots.</p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="c">
+                <legend>2. Why can a newly marked blob not be swept in the same invocation?</legend>
+                <label class="option"><input type="radio" name="q2" value="a" /> SQLite cannot update and delete in one transaction.</label>
+                <label class="option"><input type="radio" name="q2" value="b" /> GC waits for a 24-hour grace period.</label>
+                <label class="option"><input type="radio" name="q2" value="c" /> Classification is frozen from run-start state, and only a prior committed mark enters the sweep set.</label>
+                <p class="explanation"><strong>Answer:</strong> The fixed snapshot creates the two-transition boundary. There is no time-based grace in this milestone.</p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="a">
+                <legend>3. A run commits a mark, later hits a sweep error, and exits 1. Is that blob eligible to sweep next invocation if still unreachable?</legend>
+                <label class="option"><input type="radio" name="q3" value="a" /> Yes—the mark is committed state even though the process did not exit 0.</label>
+                <label class="option"><input type="radio" name="q3" value="b" /> No—two exit-code-0 runs are required.</label>
+                <label class="option"><input type="radio" name="q3" value="c" /> Only after its timestamp is at least one day old.</label>
+                <p class="explanation"><strong>Answer:</strong> Per-blob committed transitions, not process exit status, define the boundary.</p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="b">
+                <legend>4. Which statement about <code>gc --dry-run</code> is correct?</legend>
+                <label class="option"><input type="radio" name="q4" value="a" /> It only queries SQLite and skips CAS work.</label>
+                <label class="option"><input type="radio" name="q4" value="b" /> It performs full planning, CAS classification, size checks, and candidate hashing without durable mutation.</label>
+                <label class="option"><input type="radio" name="q4" value="c" /> It uses a writable transaction and rolls it back.</label>
+                <p class="explanation"><strong>Answer:</strong> Dry-run is a complete read-only safety preflight, not a cheap estimate.</p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="c">
+                <legend>5. What happens when preflight finds a valid orphan CAS blob?</legend>
+                <label class="option"><input type="radio" name="q5" value="a" /> GC deletes it because nothing references it.</label>
+                <label class="option"><input type="radio" name="q5" value="b" /> GC adopts it into the catalog.</label>
+                <label class="option"><input type="radio" name="q5" value="c" /> It reports <code>ORPHAN_BLOB</code>, exits 2, and performs no application/CAS mutation.</label>
+                <p class="explanation"><strong>Answer:</strong> Orphans lack a catalog lifecycle and therefore block GC; repair is a future workflow.</p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="a">
+                <legend>6. Which is the correct order for deleting a present candidate?</legend>
+                <label class="option"><input type="radio" name="q6" value="a" /> Revalidate → unlink → sync directory → stage catalog delete → commit.</label>
+                <label class="option"><input type="radio" name="q6" value="b" /> Delete catalog row → unlink → prune shard directories.</label>
+                <label class="option"><input type="radio" name="q6" value="c" /> Chmod → unlink → mark → checkpoint.</label>
+                <p class="explanation"><strong>Answer:</strong> File-first ordering makes interruption recoverable; directory sync strengthens deletion durability.</p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="b">
+                <legend>7. What identity is checked immediately before unlink?</legend>
+                <label class="option"><input type="radio" name="q7" value="a" /> Filename and modification time only.</label>
+                <label class="option"><input type="radio" name="q7" value="b" /> Regular-file type, length, device, and inode from the preflight-opened file.</label>
+                <label class="option"><input type="radio" name="q7" value="c" /> Only the cataloged byte length.</label>
+                <p class="explanation"><strong>Answer:</strong> The path is canonical and the final file must still match the opened file's type, size, device, and inode.</p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="c">
+                <legend>8. When is a missing canonical CAS file treated as an interrupted sweep instead of a finding?</legend>
+                <label class="option"><input type="radio" name="q8" value="a" /> Whenever the file is missing.</label>
+                <label class="option"><input type="radio" name="q8" value="b" /> When the blob is referenced but marked.</label>
+                <label class="option"><input type="radio" name="q8" value="c" /> Only when it was already marked at run start, remains unreachable, and the path is genuinely absent.</label>
+                <p class="explanation"><strong>Answer:</strong> The exception is deliberately narrow. Missing live or newly markable blobs remain blocking findings.</p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="a">
+                <legend>9. What does re-importing content do to a matching marked blob?</legend>
+                <label class="option"><input type="radio" name="q9" value="a" /> It validates the size, clears the mark, and upserts the source observation in one transaction.</label>
+                <label class="option"><input type="radio" name="q9" value="b" /> It leaves the mark for the next GC run to repair.</label>
+                <label class="option"><input type="radio" name="q9" value="c" /> It creates a second blob row with the same hash.</label>
+                <p class="explanation"><strong>Answer:</strong> Import resurrection makes catalog existence, live state, and the source reference atomic.</p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="b">
+                <legend>10. What does “Bytes reclaimed” mean?</legend>
+                <label class="option"><input type="radio" name="q10" value="a" /> Exact physical ZFS blocks returned to the pool.</label>
+                <label class="option"><input type="radio" name="q10" value="b" /> Cataloged logical sizes for present sweeps known to have committed.</label>
+                <label class="option"><input type="radio" name="q10" value="c" /> The sum of all marked blob sizes, including already-absent files.</label>
+                <p class="explanation"><strong>Answer:</strong> Physical recovery can differ because of compression, snapshots, deduplication, sparse files, reflinks, and hard links.</p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="c">
+                <legend>11. Why must the store and catalog remain quiescent during GC?</legend>
+                <label class="option"><input type="radio" name="q11" value="a" /> Only to make progress output easier to read.</label>
+                <label class="option"><input type="radio" name="q11" value="b" /> SQLite WAL mode prevents all filesystem races anyway.</label>
+                <label class="option"><input type="radio" name="q11" value="c" /> SQLite reserves the catalog snapshot but cannot lock CAS operations or prevent parent/path replacement by external writers.</label>
+                <p class="explanation"><strong>Answer:</strong> The transaction protects catalog state, not the separate filesystem. Milestone 4 has no global run lock.</p>
+              </fieldset>
+
+              <fieldset class="question" data-answer="a">
+                <legend>12. A final SQLite commit returns an error after one file was unlinked and synced. What can GC safely report?</legend>
+                <label class="option"><input type="radio" name="q12" value="a" /> Known physical unlink progress, but no staged catalog actions as known-complete.</label>
+                <label class="option"><input type="radio" name="q12" value="b" /> Every staged action as complete because commit usually succeeds.</label>
+                <label class="option"><input type="radio" name="q12" value="c" /> Nothing at all—not even known filesystem progress.</label>
+                <p class="explanation"><strong>Answer:</strong> Failed commit durability is ambiguous. The report stays conservative while preserving directly observed unlink/sync progress.</p>
+              </fieldset>
+
+              <div class="quiz-actions">
+                <button class="button" type="submit">Grade my answers</button>
+                <button class="button secondary" id="reset-quiz" type="button">Reset quiz</button>
+                <button class="button secondary" type="button" onclick="window.print()">Print report</button>
+              </div>
+            </form>
+
+            <div class="quiz-result" id="quiz-result" role="status" aria-live="polite"></div>
+          </section>
+        </article>
+      </div>
+
+      <p class="footer-note">
+        Generated from the implemented Milestone 4 change and its authoritative execution plan.
+        The quiz stores only your best score in this browser.
+      </p>
+    </main>
+
+    <script>
+      (() => {
+        const progress = document.getElementById("scroll-progress");
+        const tocLinks = [...document.querySelectorAll(".toc a")];
+        const sections = tocLinks
+          .map((link) => document.querySelector(link.getAttribute("href")))
+          .filter(Boolean);
+
+        function updateProgress() {
+          const max = document.documentElement.scrollHeight - window.innerHeight;
+          const ratio = max > 0 ? window.scrollY / max : 0;
+          progress.style.width = `${Math.min(100, Math.max(0, ratio * 100))}%`;
+        }
+
+        window.addEventListener("scroll", updateProgress, { passive: true });
+        updateProgress();
+
+        const observer = new IntersectionObserver(
+          (entries) => {
+            const visible = entries
+              .filter((entry) => entry.isIntersecting)
+              .sort((left, right) => right.intersectionRatio - left.intersectionRatio)[0];
+            if (!visible) return;
+            tocLinks.forEach((link) => {
+              link.classList.toggle(
+                "active",
+                link.getAttribute("href") === `#${visible.target.id}`,
+              );
+            });
+          },
+          { rootMargin: "-12% 0px -72% 0px", threshold: [0.05, 0.25, 0.6] },
+        );
+        sections.forEach((section) => observer.observe(section));
+
+        const form = document.getElementById("quiz-form");
+        const questions = [...form.querySelectorAll(".question")];
+        const result = document.getElementById("quiz-result");
+        const bestScore = document.getElementById("best-score");
+        const passScore = 10;
+        const storageKey = "media-importer-m4-best-score";
+
+        function renderBestScore() {
+          const best = Number.parseInt(localStorage.getItem(storageKey) || "", 10);
+          bestScore.textContent = Number.isFinite(best)
+            ? `Best score: ${best} / ${questions.length}`
+            : "Best score: not attempted";
+        }
+
+        renderBestScore();
+
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          let answered = 0;
+          let score = 0;
+          let firstIncorrect = null;
+
+          questions.forEach((question, index) => {
+            const selected = question.querySelector(`input[name="q${index + 1}"]:checked`);
+            question.classList.remove("correct", "incorrect", "graded");
+            if (!selected) return;
+
+            answered += 1;
+            const correct = selected.value === question.dataset.answer;
+            question.classList.add("graded", correct ? "correct" : "incorrect");
+            if (correct) {
+              score += 1;
+            } else if (!firstIncorrect) {
+              firstIncorrect = question;
+            }
+          });
+
+          result.className = "quiz-result show";
+          if (answered !== questions.length) {
+            result.classList.add("fail");
+            result.innerHTML = `<strong>Answer all ${questions.length} questions first.</strong>
+              You have answered ${answered}. Unanswered questions remain ungraded.`;
+            const firstUnanswered = questions.find(
+              (question, index) =>
+                !question.querySelector(`input[name="q${index + 1}"]:checked`),
+            );
+            firstUnanswered?.scrollIntoView({ behavior: "smooth", block: "center" });
+            return;
+          }
+
+          const previous = Number.parseInt(localStorage.getItem(storageKey) || "0", 10);
+          if (score > previous) localStorage.setItem(storageKey, String(score));
+          renderBestScore();
+
+          if (score >= passScore) {
+            result.classList.add("pass");
+            result.innerHTML = `<strong>Passed — ${score} / ${questions.length}</strong>
+              You have demonstrated a working understanding of the Milestone 4 lifecycle,
+              safety preflight, mutation order, and recovery semantics.`;
+            result.scrollIntoView({ behavior: "smooth", block: "center" });
+          } else {
+            result.classList.add("fail");
+            result.innerHTML = `<strong>Not yet — ${score} / ${questions.length}</strong>
+              Review the explanations under the missed questions, then change your answers and
+              grade again. You need ${passScore} correct to pass.`;
+            firstIncorrect?.scrollIntoView({ behavior: "smooth", block: "center" });
+          }
+        });
+
+        document.getElementById("reset-quiz").addEventListener("click", () => {
+          form.reset();
+          questions.forEach((question) =>
+            question.classList.remove("correct", "incorrect", "graded"),
+          );
+          result.className = "quiz-result";
+          result.textContent = "";
+          document.getElementById("quiz").scrollIntoView({ behavior: "smooth" });
+        });
+      })();
+    </script>
+  </body>
+</html>

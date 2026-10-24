@@ -77,8 +77,31 @@ A brief justification.
 
 The most important evidence you reviewed.
 
-If **Next agent if approved** is an agent name, delegate to that agent and pass
-along the original handoff plus a short verification note at the top.
+If **Next agent if approved** is an agent name, delegate to that agent in the
+**foreground**. Do **not** use a background task or a background agent.
+
+Use a self-contained delegation payload in this format:
+
+```text
+You are `<next agent>`. The judge approved the previous stage in the foreground.
+Continue the loop in the foreground using the verified context below.
+
+## Judge status
+
+approved
+
+## Why
+
+[brief justification]
+
+## Checks performed
+
+[most important evidence]
+
+## Verified handoff
+
+[paste the original handoff verbatim]
+```
 
 If **Next agent if approved** is `none`, return the approval as the verified end
 of the loop and do not delegate further.
@@ -101,5 +124,32 @@ Concrete instructions that the previous stage can act on immediately.
 
 The most important evidence you reviewed.
 
-Then delegate to the agent named in **Return agent if rejected** with the
-rejection note and the original handoff.
+Then delegate to the agent named in **Return agent if rejected** in the
+**foreground**. Do **not** use a background task or a background agent.
+
+Use a self-contained delegation payload in this format:
+
+```text
+You are `<return agent>`. The judge rejected the previous stage in the
+foreground. Rework it using the rejection details and original context below.
+
+## Judge status
+
+rejected
+
+## Why
+
+[concise explanation]
+
+## Required improvements
+
+[concrete instructions]
+
+## Checks performed
+
+[most important evidence]
+
+## Original handoff
+
+[paste the original handoff verbatim]
+```

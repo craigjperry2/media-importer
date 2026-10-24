@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  # Pull requests are checked by the pull_request event, so pushes only need
+  # checking once they land on main.
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  qualification:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # Qualification normally finishes in under five minutes. Bound a hung
+    # test so it fails the job instead of holding a runner for hours.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v20
+      - run: nix develop --command cargo fmt --all --check
+      - run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
+      # Each step that runs tests normally takes under a minute. A per-step
+      # bound fails the step that hung instead of waiting out the job.
+      - run: nix develop --command cargo test --workspace
+        timeout-minutes: 10
+      - run: nix develop --command cargo test --workspace --test milestone11_extended -- --ignored
+        timeout-minutes: 10
+      # The prek hooks run the workspace tests again.
+      - run: nix develop --command prek run --all-files
+        timeout-minutes: 10
