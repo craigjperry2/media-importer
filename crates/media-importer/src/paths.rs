@@ -49,9 +49,7 @@ impl StoreRoot {
             return Ok(Self { path: canonical });
         }
 
-        let parent = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
+        let parent = parent_dir(path)
             .ok_or_else(|| color_eyre::eyre::eyre!("store path must have an existing parent"))?;
         let canonical_parent = parent.canonicalize().map_err(|error| {
             color_eyre::eyre::eyre!("canonicalize store parent {:?}: {error}", parent)
@@ -137,9 +135,7 @@ impl BrowseTreeRoot {
                 })
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let parent = path
-                    .parent()
-                    .filter(|parent| !parent.as_os_str().is_empty())
+                let parent = parent_dir(path)
                     .ok_or_else(|| eyre!("browse tree path must have an existing parent"))?;
                 validate_real_directory(parent, "browse tree parent")?;
                 let canonical_parent = parent
@@ -257,10 +253,19 @@ impl Default for StagingFileName {
     }
 }
 
+/// The directory containing `path`; a bare relative name lives in `.`.
+fn parent_dir(path: &Path) -> Option<&Path> {
+    path.parent().map(|parent| {
+        if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        }
+    })
+}
+
 pub fn validate_db_path(path: &Path) -> Result<PathBuf> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
+    let parent = parent_dir(path)
         .ok_or_else(|| color_eyre::eyre::eyre!("database path must have an existing parent"))?;
     let canonical_parent = parent.canonicalize().map_err(|error| {
         color_eyre::eyre::eyre!("canonicalize database parent {:?}: {error}", parent)

@@ -1593,6 +1593,7 @@ fn dry_run_import(config: ImportConfig, observer: &dyn IngestObserver) -> Result
             ..ImportReport::default()
         };
         let mut sequence = 0_u64;
+        let mut planned_blobs = BTreeSet::new();
         for candidate in scan_source(&config.source_root) {
             if observer.cancelled() {
                 return Err(eyre!("telemetry renderer failed"));
@@ -1671,7 +1672,16 @@ fn dry_run_import(config: ImportConfig, observer: &dyn IngestObserver) -> Result
                     });
                     report.files_hashed += 1;
                     report.bytes_hashed += blob.size_bytes;
-                    report_store_outcome(&mut report, &blob.outcome, blob.size_bytes);
+                    // Nothing is written in a dry run, so a hash planned for
+                    // creation earlier in this run would be reused, not created.
+                    let outcome = if blob.outcome == StoreOutcome::Created
+                        && !planned_blobs.insert(blob.hash.clone())
+                    {
+                        StoreOutcome::Reused
+                    } else {
+                        blob.outcome
+                    };
+                    report_store_outcome(&mut report, &outcome, blob.size_bytes);
                     report_source_outcome(
                         &mut report,
                         &catalog

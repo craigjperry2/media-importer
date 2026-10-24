@@ -778,15 +778,53 @@ fn dry_run_missing_store_creates_nothing() {
         .child("a.txt")
         .write_str("alpha")
         .expect("write file");
+    source
+        .child("copy-of-a.txt")
+        .write_str("alpha")
+        .expect("write duplicate");
     let store = temp.child("missing-store");
 
     run_import_args(source.path(), store.path(), &["--dry-run"])
         .success()
         .stdout(predicate::str::contains("Dry run complete"))
-        .stdout(predicate::str::contains("Files seen: 1"))
-        .stdout(predicate::str::contains("Blobs that would be created: 1"));
+        .stdout(predicate::str::contains("Files seen: 2"))
+        .stdout(predicate::str::contains("Blobs that would be created: 1\n"))
+        .stdout(predicate::str::contains("Blobs that would be reused: 1\n"))
+        .stdout(predicate::str::contains("Bytes that would be written: 5\n"));
 
     assert!(!store.path().exists());
+}
+
+#[test]
+fn bare_relative_store_db_and_browse_tree_names_resolve_in_working_directory() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+
+    Command::cargo_bin("media-importer")
+        .expect("binary exists")
+        .current_dir(temp.path())
+        .args(["--output", "human", "import", "--store", "store"])
+        .args(["--source", "source", "--db", "catalog.sqlite"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Blobs created: 1\n"));
+    Command::cargo_bin("media-importer")
+        .expect("binary exists")
+        .current_dir(temp.path())
+        .args(["--output", "human", "build-tree", "--store", "store"])
+        .args(["--browse-tree", "browse", "--db", "catalog.sqlite"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Links created: 1\n"));
+
+    assert_blob(temp.child("store").path(), "alpha", true);
+    assert!(temp.child("catalog.sqlite").path().is_file());
+    assert!(temp.child("browse").path().is_dir());
 }
 
 #[test]
