@@ -19,8 +19,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@v20
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@v23
       - run: nix develop --command cargo fmt --all --check
       - run: nix develop --command cargo clippy --workspace --all-targets -- -D warnings
       # Each step that runs tests normally takes under a minute. A per-step

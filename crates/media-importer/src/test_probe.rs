@@ -68,7 +68,7 @@ unsafe fn inner_file(file: *mut ffi::sqlite3_file) -> *mut ffi::sqlite3_file {
 }
 
 macro_rules! forward_file_method {
-    ($name:ident($($argument:ident: $argument_type:ty),*) -> $return_type:ty, $field:ident) => {
+    ($name:ident($($argument:ident: $argument_type:ty),* $(,)?) -> $return_type:ty, $field:ident) => {
         unsafe extern "C" fn $name(
             file: *mut ffi::sqlite3_file,
             $($argument: $argument_type),*
@@ -87,21 +87,47 @@ macro_rules! forward_file_method {
 }
 
 forward_file_method!(checkpoint_probe_close() -> i32, xClose);
-forward_file_method!(checkpoint_probe_read(buffer: *mut std::ffi::c_void, amount: i32, offset: i64) -> i32, xRead);
-forward_file_method!(checkpoint_probe_write(buffer: *const std::ffi::c_void, amount: i32, offset: i64) -> i32, xWrite);
+forward_file_method!(
+    checkpoint_probe_read(buffer: *mut std::ffi::c_void, amount: i32, offset: i64) -> i32,
+    xRead
+);
+forward_file_method!(
+    checkpoint_probe_write(buffer: *const std::ffi::c_void, amount: i32, offset: i64) -> i32,
+    xWrite
+);
 forward_file_method!(checkpoint_probe_truncate(size: i64) -> i32, xTruncate);
 forward_file_method!(checkpoint_probe_sync(flags: i32) -> i32, xSync);
 forward_file_method!(checkpoint_probe_file_size(size: *mut i64) -> i32, xFileSize);
 forward_file_method!(checkpoint_probe_lock(level: i32) -> i32, xLock);
 forward_file_method!(checkpoint_probe_unlock(level: i32) -> i32, xUnlock);
-forward_file_method!(checkpoint_probe_check_reserved_lock(result: *mut i32) -> i32, xCheckReservedLock);
+forward_file_method!(
+    checkpoint_probe_check_reserved_lock(result: *mut i32) -> i32,
+    xCheckReservedLock
+);
 forward_file_method!(checkpoint_probe_sector_size() -> i32, xSectorSize);
 forward_file_method!(checkpoint_probe_device_characteristics() -> i32, xDeviceCharacteristics);
-forward_file_method!(checkpoint_probe_shm_map(page: i32, page_size: i32, extend: i32, result: *mut *mut std::ffi::c_void) -> i32, xShmMap);
-forward_file_method!(checkpoint_probe_shm_lock(offset: i32, count: i32, flags: i32) -> i32, xShmLock);
+forward_file_method!(
+    checkpoint_probe_shm_map(
+        page: i32,
+        page_size: i32,
+        extend: i32,
+        result: *mut *mut std::ffi::c_void,
+    ) -> i32,
+    xShmMap
+);
+forward_file_method!(
+    checkpoint_probe_shm_lock(offset: i32, count: i32, flags: i32) -> i32,
+    xShmLock
+);
 forward_file_method!(checkpoint_probe_shm_unmap(delete: i32) -> i32, xShmUnmap);
-forward_file_method!(checkpoint_probe_fetch(offset: i64, amount: i32, result: *mut *mut std::ffi::c_void) -> i32, xFetch);
-forward_file_method!(checkpoint_probe_unfetch(offset: i64, value: *mut std::ffi::c_void) -> i32, xUnfetch);
+forward_file_method!(
+    checkpoint_probe_fetch(offset: i64, amount: i32, result: *mut *mut std::ffi::c_void) -> i32,
+    xFetch
+);
+forward_file_method!(
+    checkpoint_probe_unfetch(offset: i64, value: *mut std::ffi::c_void) -> i32,
+    xUnfetch
+);
 
 unsafe extern "C" fn checkpoint_probe_shm_barrier(file: *mut ffi::sqlite3_file) {
     // SAFETY: see `forward_file_method`; this is the void-returning variant.
