@@ -32,3 +32,32 @@ jobs:
       # The prek hooks run the workspace tests again.
       - run: nix develop --command prek run --all-files
         timeout-minutes: 10
+      # The Nix package that hosts install, with its own release-profile test
+      # run. Linux only: no host installs the macOS build.
+      - if: runner.os == 'Linux'
+        run: nix flake check --print-build-logs
+        timeout-minutes: 15
+
+  # Publishes release v<crate version> once main passes qualification, unless
+  # it already exists. Releasing means merging a crate version bump.
+  release:
+    if: github.event_name == 'push'
+    needs: qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Publish a release for a new crate version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "media-importer") | .version')
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "Release v$version already exists."
+            exit 0
+          fi
+          gh release create "v$version" --target "$GITHUB_SHA" --generate-notes

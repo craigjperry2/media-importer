@@ -302,6 +302,27 @@ sequential read/hash/staging stream; it does not establish physical disk reads
 or page-cache bypass. The checked-in GitHub Actions workflow is configured to
 run the normal and extended commands on Linux and macOS.
 
+## Releases and Deployment
+
+The flake exports the CLI as `packages.<system>.media-importer` (also
+`default`). `nix flake check` builds it and runs the test suite in the release
+profile, as a host's build does. CI runs it on Linux.
+
+To release, open a pull request that bumps `version` in
+`crates/media-importer/Cargo.toml` (and runs `nix flake update` to refresh the
+pinned toolchain). After it merges and CI passes on `main`, CI publishes GitHub
+release `v<version>` on that commit.
+
+Hosts consume a release by its tag, so `nix flake update` on the host never
+moves to a newer release:
+
+```nix
+inputs.media-importer.url = "github:craigjperry2/media-importer/v0.1.0";
+```
+
+To deploy a new release, change the tag in the URL, run
+`nix flake lock` on the host flake, and rebuild.
+
 ## Repository Layout
 
 - `Cargo.toml`: root Cargo workspace.
