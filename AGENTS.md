@@ -25,6 +25,11 @@ Execute these from the project root after entering the dev environment
 - **Test:** `cargo test --workspace`
 - **Hooks:** `prek run --all-files`
 - **Run CLI:** `cargo run -p media-importer --`
+- **Validate before finishing a turn:** If you changed any files, run
+  `prek run --all-files` and fix every failure before you end your turn or
+  commit. Git hooks may not run for you; Amp orbs, for example, use a global
+  `core.hooksPath` that disables the repo's pre-commit hook. The format hook
+  only checks, so run `cargo fmt --all` to fix formatting, then rerun prek.
 
 ## Boundaries
 

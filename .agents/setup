@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Prepares an Amp orb with this repository's Nix flake development shell.
+# Runs once per fresh orb (and again on stale snapshots), so it must be
+# non-interactive, idempotent, and fast when the Nix store and target/ are warm.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+  local name="$1"
+  shift
+  local start=$SECONDS
+  echo "==> $name"
+  "$@"
+  echo "<== $name ($((SECONDS - start))s)"
+}
+
+nix_profile="$HOME/.nix-profile"
+if [[ ! -x "$nix_profile/bin/nix" ]]; then
+  echo "Nix is missing from $nix_profile; the orb base template should provide it." >&2
+  exit 1
+fi
+# The Nix installer cannot update this running script's environment.
+# shellcheck disable=SC1091
+source "$nix_profile/etc/profile.d/nix.sh"
+
+# Evaluating the dev shell fetches the Rust toolchain from cache.nixos.org and
+# runs its shellHook (`prek install`). Check the tools afterwards because the
+# shellHook's exit status only reflects its last command. Building every target
+# warms target/ so the first clippy or test run in the orb is incremental.
+# shellcheck disable=SC2016
+step "nix dev shell + cargo build" bash -c '
+  eval "$(nix print-dev-env "$1")"
+  rustc --version
+  cargo --version
+  cargo clippy --version
+  rustfmt --version
+  prek --version
+  cargo build --workspace --all-targets --locked
+' _ "$repo_root"
+
+# Amp and supervised orb services start in non-interactive login shells, so
+# export the flake environment from the login profile whenever a shell starts
+# in the repository root. The block is rewritten on every run so stale
+# snapshots pick up changes to it.
+# The shellHook's own output is silenced there: setup already verified the
+# tools, and `prek install` always fails in orbs because Amp configures a
+# global core.hooksPath (Nix evaluation errors still reach stderr).
+install_profile_hook() {
+  local begin="# >>> media-importer Nix development shell >>>"
+  local end="# <<< media-importer Nix development shell <<<"
+  touch "$HOME/.bash_profile"
+  sed -i "\|^$begin\$|,\|^$end\$|d" "$HOME/.bash_profile"
+  cat >>"$HOME/.bash_profile" <<EOF
+$begin
+if [[ -z "\${IN_NIX_SHELL:-}" && "\${PWD}" == "$repo_root" ]]; then
+  eval "\$("$nix_profile/bin/nix" print-dev-env "$repo_root")" >/dev/null 2>&1
+fi
+$end
+EOF
+}
+step "login shell hook" install_profile_hook

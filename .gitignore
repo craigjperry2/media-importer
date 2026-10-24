@@ -5,3 +5,5 @@ target/
 .vscode/*.log
 *.swp
 *.swo
+
+.amp/portals/*
