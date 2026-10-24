@@ -1210,7 +1210,23 @@ impl SourceWorkers {
                         let store = Store::new(root);
                         while let Ok(work) = worker_jobs_rx.recv() {
                             if cancelled.load(Ordering::Acquire) || observer.cancelled() {
-                                cancelled.store(true, Ordering::Release);
+                                // Dropping this work means the coordinator will
+                                // never receive its completion. A renderer
+                                // failure seen first by a worker must therefore
+                                // be published as terminal control, or a
+                                // coordinator already blocked on completions
+                                // waits forever. If cancellation was already
+                                // set, its owner has notified the coordinator.
+                                signal_terminal_worker_failure(
+                                    &cancelled,
+                                    &failure_tx,
+                                    SourceWorkerFailure {
+                                        sequence: Some(work.sequence),
+                                        source_path: Some(work.candidate.relative_path.clone()),
+                                        mount_id: Some(work.candidate.mount_id),
+                                        context: "telemetry renderer failed".to_owned(),
+                                    },
+                                )?;
                                 observer.observe(IngestEvent::WorkCancelled {
                                     sequence: work.sequence,
                                     source_path: work.candidate.relative_path,
@@ -2069,6 +2085,43 @@ mod tests {
         }
     }
 
+    /// Holds a source worker at its dequeue-time cancellation check until the
+    /// coordinator has made its last cancellation check before waiting for
+    /// completions. The renderer then fails, so only the worker can see it.
+    struct DequeueCancellationObserver {
+        recorder: RecordingObserver,
+        coordinator: std::sync::OnceLock<thread::ThreadId>,
+        scanner_exhausted: Arc<AtomicBool>,
+        coordinator_waiting: mpsc::Sender<()>,
+        renderer_failed: AtomicBool,
+        release_worker: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl IngestObserver for DequeueCancellationObserver {
+        fn observe(&self, event: IngestEvent) {
+            self.recorder.observe(event);
+        }
+
+        fn cancelled(&self) -> bool {
+            let failed = self.renderer_failed.load(Ordering::Acquire);
+            if self.coordinator.get() == Some(&thread::current().id()) {
+                if self.scanner_exhausted.load(Ordering::Acquire) {
+                    let _ = self.coordinator_waiting.send(());
+                }
+                return failed;
+            }
+            if failed {
+                return true;
+            }
+            let _ = self
+                .release_worker
+                .lock()
+                .expect("worker release receiver")
+                .recv();
+            self.renderer_failed.load(Ordering::Acquire)
+        }
+    }
+
     struct SaturationObserver {
         recorder: RecordingObserver,
         mount_work_saturated: mpsc::Sender<()>,
@@ -2867,6 +2920,58 @@ mod tests {
             events
                 .iter()
                 .any(|event| matches!(event, IngestEvent::Shutdown)),
+            "workers must join before returning"
+        );
+    }
+
+    #[test]
+    fn renderer_failure_seen_only_by_a_worker_wakes_a_coordinator_waiting_for_completions() {
+        let harness = ExecutorHarness::new();
+        let scanner_exhausted = Arc::new(AtomicBool::new(false));
+        let exhausted = Arc::clone(&scanner_exhausted);
+        let candidates = harness
+            .candidates(&[("queued", b"queued", 1)])
+            .into_iter()
+            .chain(std::iter::from_fn(move || {
+                exhausted.store(true, Ordering::Release);
+                None
+            }));
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let observer = Arc::new(DequeueCancellationObserver {
+            recorder: RecordingObserver::default(),
+            coordinator: std::sync::OnceLock::new(),
+            scanner_exhausted,
+            coordinator_waiting: waiting_tx,
+            renderer_failed: AtomicBool::new(false),
+            release_worker: Mutex::new(release_rx),
+        });
+        let run_observer = Arc::clone(&observer);
+        let (result_tx, result_rx) = mpsc::channel();
+        thread::spawn(move || {
+            run_observer
+                .coordinator
+                .set(thread::current().id())
+                .expect("coordinator identity");
+            let _ = result_tx.send(harness.run(candidates, 1, run_observer));
+        });
+        waiting_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("coordinator makes its last cancellation check after the scanner ends");
+        observer.renderer_failed.store(true, Ordering::Release);
+        release_tx
+            .send(())
+            .expect("release worker cancellation check");
+        let error = result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a renderer failure seen only by a worker must wake the coordinator")
+            .expect_err("renderer failure must fail import");
+        assert!(
+            format!("{error:#}").contains("telemetry renderer failed"),
+            "renderer failure context: {error:#}"
+        );
+        assert!(
+            observer.recorder.events().contains(&IngestEvent::Shutdown),
             "workers must join before returning"
         );
     }
