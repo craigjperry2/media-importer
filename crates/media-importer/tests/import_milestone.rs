@@ -778,13 +778,19 @@ fn dry_run_missing_store_creates_nothing() {
         .child("a.txt")
         .write_str("alpha")
         .expect("write file");
+    source
+        .child("copy-of-a.txt")
+        .write_str("alpha")
+        .expect("write duplicate");
     let store = temp.child("missing-store");
 
     run_import_args(source.path(), store.path(), &["--dry-run"])
         .success()
         .stdout(predicate::str::contains("Dry run complete"))
-        .stdout(predicate::str::contains("Files seen: 1"))
-        .stdout(predicate::str::contains("Blobs that would be created: 1"));
+        .stdout(predicate::str::contains("Files seen: 2"))
+        .stdout(predicate::str::contains("Blobs that would be created: 1\n"))
+        .stdout(predicate::str::contains("Blobs that would be reused: 1\n"))
+        .stdout(predicate::str::contains("Bytes that would be written: 5\n"));
 
     assert!(!store.path().exists());
 }
