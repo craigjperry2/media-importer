@@ -1303,17 +1303,22 @@ impl SourceWorkers {
                                     mount_id: Some(mount_id),
                                     context: format!("{error:#}"),
                                 };
+                                let context = failure.context.clone();
+                                // Publish cancellation before the terminal
+                                // control signal and return instead of taking
+                                // another job. The first failure is the one
+                                // with stable source context. Both happen
+                                // before notifying the observer, which may
+                                // block or panic: the coordinator must not
+                                // consume more candidates and siblings must
+                                // not start reads while it runs.
+                                signal_terminal_worker_failure(&cancelled, &failure_tx, failure)?;
                                 observer.observe(IngestEvent::WorkFailed {
                                     sequence: work.sequence,
                                     source_path: work.candidate.relative_path.clone(),
                                     mount_id,
-                                    context: failure.context.clone(),
+                                    context,
                                 });
-                                // Publish cancellation before the terminal
-                                // control signal and return instead of taking
-                                // another job. The first failure is the one
-                                // with stable source context.
-                                signal_terminal_worker_failure(&cancelled, &failure_tx, failure)?;
                                 // Tests can hold a worker after its terminal
                                 // state is visible, proving the run lock waits
                                 // for every active sibling during shutdown.
