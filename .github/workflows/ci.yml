@@ -1,7 +1,10 @@
-name: Milestone 11 qualification
+name: CI
 
 on:
+  # Pull requests are checked by the pull_request event, so pushes only need
+  # checking once they land on main.
   push:
+    branches: [main]
   pull_request:
 
 jobs:
