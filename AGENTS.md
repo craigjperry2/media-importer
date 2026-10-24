@@ -5,6 +5,7 @@ Execute these from the project root after entering the dev environment (`direnv 
 * **Test:** `pytest`
 * **Run CLI:** `media-importer` (e.g., `media-importer scan --store store-root/ --db db.sqlite --source src/`)
 * **Dry Run:** Add `--dry-run` to the CLI to preview actions without side-effects.
+* **Validate before finishing a turn:** If you changed any files, run `prek run --all-files` and fix every failure before you end your turn or commit. Git hooks may not run for you; Amp orbs, for example, use a global `core.hooksPath` that disables the repo's pre-commit hook. prek only checks tracked files, so first run `git add --intent-to-add <path>` for each new file. The ruff hooks fix files in place and report "files were modified", so rerun until every hook passes.
 
 ## 🧱 Boundaries (Dos and Don'ts)
 * **DO keep Planner Pure:** `planner.py` must remain purely functional. It compares states and yields plans. No side-effects (no DB writes, no disk writes).
