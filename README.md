@@ -5,7 +5,7 @@ store backed by a SQLite catalog, materializing a browse tree, auditing catalog
 and CAS integrity, and explicitly collecting unreachable blobs.
 
 The current implementation exposes `import`, `build-tree`, `audit`, and `gc`.
-The Rust rewrite documentation under `docs/from-scratch-in-rust/` is
+The Rust rewrite documentation under `docs/rust/` is
 authoritative. Material under `docs/old_python/` is historical context, not a
 behavior oracle.
 
@@ -306,7 +306,7 @@ run the normal and extended commands on Linux and macOS.
 
 - `Cargo.toml`: root Cargo workspace.
 - `crates/media-importer/`: Rust application package, binary, and library.
-- `docs/from-scratch-in-rust/`: active product, architecture, testing, and
+- `docs/rust/`: active product, architecture, testing, and
   implementation guidance for the rewrite.
 - `docs/old_python/`: archived Python-era notes and feature material. Do not
   use this archive as a behavior oracle for the Rust implementation.

@@ -102,7 +102,7 @@ fn workspace_manifests() -> Vec<PathBuf> {
 #[test]
 fn milestone_eleven_conformance_matrix_references_existing_named_behavior_tests() {
     let root = repository_root();
-    let matrix = read(&root.join("docs/from-scratch-in-rust/IMPLEMENTATION-MILESTONE11.md"));
+    let matrix = read(&root.join("docs/rust/IMPLEMENTATION-MILESTONE11.md"));
     let required = [
         (
             "tests/import_milestone.rs",
@@ -166,7 +166,7 @@ fn milestone_eleven_conformance_matrix_references_existing_named_behavior_tests(
 #[test]
 fn milestone_eleven_conformance_matrix_validates_every_requirement_row_and_reference() {
     let root = repository_root();
-    let matrix_path = root.join("docs/from-scratch-in-rust/IMPLEMENTATION-MILESTONE11.md");
+    let matrix_path = root.join("docs/rust/IMPLEMENTATION-MILESTONE11.md");
     let matrix = read(&matrix_path);
     let reference = Regex::new(
         r"(?:(?P<path>(?:tests|src)/[A-Za-z0-9_./-]+\.rs)|(?P<module>[A-Za-z0-9_]+))::(?:tests::)?(?P<test>[A-Za-z0-9_]+)",

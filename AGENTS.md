@@ -5,11 +5,11 @@
 This repository is in a clean-slate Rust rewrite. Treat these files as the
 source of truth for current implementation work:
 
-- `docs/from-scratch-in-rust/SPEC.md`
-- `docs/from-scratch-in-rust/RUST.instructions.md`
-- `docs/from-scratch-in-rust/RUST-ARCHITECTURE.instructions.md`
-- `docs/from-scratch-in-rust/RUST-TESTING.instructions.md`
-- `docs/from-scratch-in-rust/SQLITE.instructions.md`
+- `docs/rust/SPEC.md`
+- `docs/rust/RUST.instructions.md`
+- `docs/rust/RUST-ARCHITECTURE.instructions.md`
+- `docs/rust/RUST-TESTING.instructions.md`
+- `docs/rust/SQLITE.instructions.md`
 
 The Python implementation is deprecated historical context. Material under
 `docs/old_python/` may explain past decisions, but it is not a behavior oracle
