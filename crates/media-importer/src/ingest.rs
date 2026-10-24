@@ -1210,7 +1210,23 @@ impl SourceWorkers {
                         let store = Store::new(root);
                         while let Ok(work) = worker_jobs_rx.recv() {
                             if cancelled.load(Ordering::Acquire) || observer.cancelled() {
-                                cancelled.store(true, Ordering::Release);
+                                // Dropping this work means the coordinator will
+                                // never receive its completion. A renderer
+                                // failure seen first by a worker must therefore
+                                // be published as terminal control, or a
+                                // coordinator already blocked on completions
+                                // waits forever. If cancellation was already
+                                // set, its owner has notified the coordinator.
+                                signal_terminal_worker_failure(
+                                    &cancelled,
+                                    &failure_tx,
+                                    SourceWorkerFailure {
+                                        sequence: Some(work.sequence),
+                                        source_path: Some(work.candidate.relative_path.clone()),
+                                        mount_id: Some(work.candidate.mount_id),
+                                        context: "telemetry renderer failed".to_owned(),
+                                    },
+                                )?;
                                 observer.observe(IngestEvent::WorkCancelled {
                                     sequence: work.sequence,
                                     source_path: work.candidate.relative_path,
@@ -1287,17 +1303,22 @@ impl SourceWorkers {
                                     mount_id: Some(mount_id),
                                     context: format!("{error:#}"),
                                 };
+                                let context = failure.context.clone();
+                                // Publish cancellation before the terminal
+                                // control signal and return instead of taking
+                                // another job. The first failure is the one
+                                // with stable source context. Both happen
+                                // before notifying the observer, which may
+                                // block or panic: the coordinator must not
+                                // consume more candidates and siblings must
+                                // not start reads while it runs.
+                                signal_terminal_worker_failure(&cancelled, &failure_tx, failure)?;
                                 observer.observe(IngestEvent::WorkFailed {
                                     sequence: work.sequence,
                                     source_path: work.candidate.relative_path.clone(),
                                     mount_id,
-                                    context: failure.context.clone(),
+                                    context,
                                 });
-                                // Publish cancellation before the terminal
-                                // control signal and return instead of taking
-                                // another job. The first failure is the one
-                                // with stable source context.
-                                signal_terminal_worker_failure(&cancelled, &failure_tx, failure)?;
                                 // Tests can hold a worker after its terminal
                                 // state is visible, proving the run lock waits
                                 // for every active sibling during shutdown.
@@ -1867,6 +1888,9 @@ mod tests {
 
     impl IngestObserver for CompletionOrderObserver {
         fn observe(&self, event: IngestEvent) {
+            // Record before signalling, so sequence one's completion is in the
+            // log before the test releases sequence zero.
+            self.recorder.observe(event.clone());
             match &event {
                 IngestEvent::SourceReadStarted { sequence: 0, .. } => {
                     self.first_started.wait();
@@ -1877,7 +1901,6 @@ mod tests {
                 }
                 _ => {}
             }
-            self.recorder.observe(event);
         }
     }
 
@@ -1975,6 +1998,9 @@ mod tests {
 
     impl IngestObserver for HighNAdmissionObserver {
         fn observe(&self, event: IngestEvent) {
+            // Record before signalling: the test snapshots events as soon as
+            // saturation is signalled.
+            self.recorder.observe(event.clone());
             match &event {
                 IngestEvent::SourceReadStarted { mount_id, .. } if *mount_id == self.mount_id => {
                     if self.gated_readers.fetch_add(1, Ordering::AcqRel) < MAX_LIVE_SOURCE_WORKERS {
@@ -2000,7 +2026,6 @@ mod tests {
                 }
                 _ => {}
             }
-            self.recorder.observe(event);
         }
     }
 
@@ -2069,6 +2094,43 @@ mod tests {
         }
     }
 
+    /// Holds a source worker at its dequeue-time cancellation check until the
+    /// coordinator has made its last cancellation check before waiting for
+    /// completions. The renderer then fails, so only the worker can see it.
+    struct DequeueCancellationObserver {
+        recorder: RecordingObserver,
+        coordinator: std::sync::OnceLock<thread::ThreadId>,
+        scanner_exhausted: Arc<AtomicBool>,
+        coordinator_waiting: mpsc::Sender<()>,
+        renderer_failed: AtomicBool,
+        release_worker: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl IngestObserver for DequeueCancellationObserver {
+        fn observe(&self, event: IngestEvent) {
+            self.recorder.observe(event);
+        }
+
+        fn cancelled(&self) -> bool {
+            let failed = self.renderer_failed.load(Ordering::Acquire);
+            if self.coordinator.get() == Some(&thread::current().id()) {
+                if self.scanner_exhausted.load(Ordering::Acquire) {
+                    let _ = self.coordinator_waiting.send(());
+                }
+                return failed;
+            }
+            if failed {
+                return true;
+            }
+            let _ = self
+                .release_worker
+                .lock()
+                .expect("worker release receiver")
+                .recv();
+            self.renderer_failed.load(Ordering::Acquire)
+        }
+    }
+
     struct SaturationObserver {
         recorder: RecordingObserver,
         mount_work_saturated: mpsc::Sender<()>,
@@ -2081,6 +2143,9 @@ mod tests {
 
     impl IngestObserver for SaturationObserver {
         fn observe(&self, event: IngestEvent) {
+            // Record before signalling: the test snapshots events as soon as
+            // every saturation signal has arrived.
+            self.recorder.observe(event.clone());
             match &event {
                 IngestEvent::QueueOccupancy {
                     stage: QueueStage::PerMountWork,
@@ -2100,13 +2165,16 @@ mod tests {
                 } if !self.sent_outcomes.swap(true, Ordering::AcqRel) => {
                     let _ = self.outcomes_saturated.send(());
                 }
+                // Workers report retained completions before the coordinator
+                // can receive them, so every admitted read may already have
+                // reported before outcomes saturate. Waiting for a report
+                // after saturation would depend on worker scheduling.
                 IngestEvent::QueueOccupancy {
                     stage: QueueStage::CompletedBlobs,
                     occupancy,
                     capacity,
                     ..
-                } if self.sent_outcomes.load(Ordering::Acquire)
-                    && *occupancy > 0
+                } if *occupancy > 0
                     && *capacity == COMPLETED_WORK_RETAINED_CAPACITY
                     && !self.sent_completions.swap(true, Ordering::AcqRel) =>
                 {
@@ -2114,7 +2182,6 @@ mod tests {
                 }
                 _ => {}
             }
-            self.recorder.observe(event);
         }
     }
 
@@ -2867,6 +2934,58 @@ mod tests {
             events
                 .iter()
                 .any(|event| matches!(event, IngestEvent::Shutdown)),
+            "workers must join before returning"
+        );
+    }
+
+    #[test]
+    fn renderer_failure_seen_only_by_a_worker_wakes_a_coordinator_waiting_for_completions() {
+        let harness = ExecutorHarness::new();
+        let scanner_exhausted = Arc::new(AtomicBool::new(false));
+        let exhausted = Arc::clone(&scanner_exhausted);
+        let candidates = harness
+            .candidates(&[("queued", b"queued", 1)])
+            .into_iter()
+            .chain(std::iter::from_fn(move || {
+                exhausted.store(true, Ordering::Release);
+                None
+            }));
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let observer = Arc::new(DequeueCancellationObserver {
+            recorder: RecordingObserver::default(),
+            coordinator: std::sync::OnceLock::new(),
+            scanner_exhausted,
+            coordinator_waiting: waiting_tx,
+            renderer_failed: AtomicBool::new(false),
+            release_worker: Mutex::new(release_rx),
+        });
+        let run_observer = Arc::clone(&observer);
+        let (result_tx, result_rx) = mpsc::channel();
+        thread::spawn(move || {
+            run_observer
+                .coordinator
+                .set(thread::current().id())
+                .expect("coordinator identity");
+            let _ = result_tx.send(harness.run(candidates, 1, run_observer));
+        });
+        waiting_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("coordinator makes its last cancellation check after the scanner ends");
+        observer.renderer_failed.store(true, Ordering::Release);
+        release_tx
+            .send(())
+            .expect("release worker cancellation check");
+        let error = result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a renderer failure seen only by a worker must wake the coordinator")
+            .expect_err("renderer failure must fail import");
+        assert!(
+            format!("{error:#}").contains("telemetry renderer failed"),
+            "renderer failure context: {error:#}"
+        );
+        assert!(
+            observer.recorder.events().contains(&IngestEvent::Shutdown),
             "workers must join before returning"
         );
     }
