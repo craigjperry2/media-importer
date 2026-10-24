@@ -2,8 +2,8 @@
 
 ## Authoritative Docs
 
-This repository is in a clean-slate Rust rewrite. Treat these files as the
-source of truth for current implementation work:
+`media-importer` is implemented in Rust. Treat these files as the source of
+truth for implementation work:
 
 - `docs/rust/SPEC.md`
 - `docs/rust/RUST.instructions.md`
@@ -11,7 +11,7 @@ source of truth for current implementation work:
 - `docs/rust/RUST-TESTING.instructions.md`
 - `docs/rust/SQLITE.instructions.md`
 
-The Python implementation is deprecated historical context. Material under
+The Rust code replaced an earlier Python implementation. Material under
 `docs/old_python/` may explain past decisions, but it is not a behavior oracle
 for Rust work.
 
@@ -42,18 +42,58 @@ Execute these from the project root after entering the dev environment
   in catalog-focused modules.
 - Keep ingest orchestration behind behavior-level interfaces.
 - Do not use ORMs.
-- Do not expose placeholder commands before their milestone.
+- Do not expose placeholder commands for unimplemented features.
 - Maintain type safety and do not suppress linting broadly.
 - Delete unused generated code instead of hiding it with `#[allow(dead_code)]`.
   Use local lint allowances only for deliberate, documented exceptions.
 
 ## Project Structure
 
-- `crates/media-importer/src/main.rs`: binary entrypoint.
-- `crates/media-importer/src/lib.rs`: library crate root.
-- Future internal modules should follow the Rust rewrite docs, starting with
-  responsibilities such as `cli`, `config`, `paths`, `scanner`, `hashing`,
-  `store`, `catalog`, `ingest`, and `telemetry` or `reporting`.
+All modules live in `crates/media-importer/src/`:
+
+- `main.rs`: binary entrypoint and command dispatch.
+- `lib.rs`: library crate root.
+- `cli.rs`: clap argument parsing.
+- `config.rs`: validated command configuration.
+- `paths.rs`: path and identity newtypes (store, source, browse tree, hashes).
+- `scanner.rs`: source tree traversal (does not follow symlinks).
+- `hashing.rs`: BLAKE3 hashing over byte streams.
+- `store.rs`: content-addressed store layout, staging, and blob installation.
+- `catalog.rs` and `catalog/sql/`: SQLite connections, schema, writer thread,
+  and raw SQL.
+- `ingest.rs`: mount-aware parallel import orchestration.
+- `materialize.rs`: `build-tree` browse-tree materialization.
+- `audit.rs`: read-only catalog and CAS integrity audit.
+- `gc.rs`: mark-and-sweep garbage collection.
+- `integrity.rs`: shared integrity findings and safe path escaping.
+- `run_lock.rs`: cooperative advisory lock on the store root.
+- `telemetry.rs`: telemetry facts and the human and JSON Lines renderers.
+- `test_probe.rs`: private handshakes for integration-test child processes.
+
+Integration tests live in `crates/media-importer/tests/`.
+
+## Specialized TDD Agents
+
+- Custom Copilot agents for the red-green-refactor loop live in
+  `.github/agents/`.
+- `tdd-judge`: verifies each completed stage in a fresh context window, then
+  either forwards it or rejects it with concrete rework instructions.
+- `tdd-requirement`: chooses the next observable outcome, gathers research, and
+  prepares a handoff for judge review.
+- `tdd-red`: writes a small failing test slice that captures the outcome, then
+  sends it to the judge.
+- `tdd-green`: makes those exact tests pass without changing them, then sends
+  the result to the judge.
+- `tdd-refactor`: refactors either tests or implementation in one pass, never
+  both, then sends the result to the judge.
+- The workflow is `requirement -> judge -> red -> judge -> green -> judge ->
+  refactor -> judge`, then either stops or loops back to `requirement`.
+- Agent-to-agent handoffs must stay in the foreground and use self-contained
+  prompts so the next agent can continue in a fresh context without losing
+  routing or verification details.
+- These agents are intentionally language-agnostic: they must infer the active
+  language, tooling, and test commands from the repository rather than assuming
+  a stack.
 
 ## Git
 

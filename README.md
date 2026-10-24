@@ -5,12 +5,12 @@ store backed by a SQLite catalog, materializing a browse tree, auditing catalog
 and CAS integrity, and explicitly collecting unreachable blobs.
 
 The current implementation exposes `import`, `build-tree`, `audit`, and `gc`.
-The Rust rewrite documentation under `docs/rust/` is
-authoritative. Material under `docs/old_python/` is historical context, not a
-behavior oracle.
+The documentation under `docs/rust/` is authoritative. Material under
+`docs/old_python/` is historical context from the earlier Python
+implementation, not a behavior oracle.
 
-Semantic blob relationships and relationship-aware GC reachability are deferred;
-they are not implemented or claimed as Milestone 11 acceptance behavior.
+Semantic blob relationships and relationship-aware GC reachability are deferred
+and not implemented.
 
 Supported targets are Linux and macOS only. Each real, exclusive command
 (`import`, `build-tree`, and `gc`) clears stale entries already present in the
@@ -306,7 +306,7 @@ run the normal and extended commands on Linux and macOS.
 
 - `Cargo.toml`: root Cargo workspace.
 - `crates/media-importer/`: Rust application package, binary, and library.
-- `docs/rust/`: active product, architecture, testing, and
-  implementation guidance for the rewrite.
+- `docs/rust/`: product spec, architecture, testing, and implementation
+  guidance, plus the milestone plans that built the Rust implementation.
 - `docs/old_python/`: archived Python-era notes and feature material. Do not
   use this archive as a behavior oracle for the Rust implementation.
