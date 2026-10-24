@@ -1888,6 +1888,9 @@ mod tests {
 
     impl IngestObserver for CompletionOrderObserver {
         fn observe(&self, event: IngestEvent) {
+            // Record before signalling, so sequence one's completion is in the
+            // log before the test releases sequence zero.
+            self.recorder.observe(event.clone());
             match &event {
                 IngestEvent::SourceReadStarted { sequence: 0, .. } => {
                     self.first_started.wait();
@@ -1898,7 +1901,6 @@ mod tests {
                 }
                 _ => {}
             }
-            self.recorder.observe(event);
         }
     }
 
@@ -1996,6 +1998,9 @@ mod tests {
 
     impl IngestObserver for HighNAdmissionObserver {
         fn observe(&self, event: IngestEvent) {
+            // Record before signalling: the test snapshots events as soon as
+            // saturation is signalled.
+            self.recorder.observe(event.clone());
             match &event {
                 IngestEvent::SourceReadStarted { mount_id, .. } if *mount_id == self.mount_id => {
                     if self.gated_readers.fetch_add(1, Ordering::AcqRel) < MAX_LIVE_SOURCE_WORKERS {
@@ -2021,7 +2026,6 @@ mod tests {
                 }
                 _ => {}
             }
-            self.recorder.observe(event);
         }
     }
 
@@ -2139,6 +2143,9 @@ mod tests {
 
     impl IngestObserver for SaturationObserver {
         fn observe(&self, event: IngestEvent) {
+            // Record before signalling: the test snapshots events as soon as
+            // every saturation signal has arrived.
+            self.recorder.observe(event.clone());
             match &event {
                 IngestEvent::QueueOccupancy {
                     stage: QueueStage::PerMountWork,
@@ -2158,13 +2165,16 @@ mod tests {
                 } if !self.sent_outcomes.swap(true, Ordering::AcqRel) => {
                     let _ = self.outcomes_saturated.send(());
                 }
+                // Workers report retained completions before the coordinator
+                // can receive them, so every admitted read may already have
+                // reported before outcomes saturate. Waiting for a report
+                // after saturation would depend on worker scheduling.
                 IngestEvent::QueueOccupancy {
                     stage: QueueStage::CompletedBlobs,
                     occupancy,
                     capacity,
                     ..
-                } if self.sent_outcomes.load(Ordering::Acquire)
-                    && *occupancy > 0
+                } if *occupancy > 0
                     && *capacity == COMPLETED_WORK_RETAINED_CAPACITY
                     && !self.sent_completions.swap(true, Ordering::AcqRel) =>
                 {
@@ -2172,7 +2182,6 @@ mod tests {
                 }
                 _ => {}
             }
-            self.recorder.observe(event);
         }
     }
 
