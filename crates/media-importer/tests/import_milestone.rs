@@ -790,6 +790,38 @@ fn dry_run_missing_store_creates_nothing() {
 }
 
 #[test]
+fn bare_relative_store_db_and_browse_tree_names_resolve_in_working_directory() {
+    let temp = TempDir::new().expect("tempdir");
+    let source = temp.child("source");
+    source.create_dir_all().expect("source dir");
+    source
+        .child("a.txt")
+        .write_str("alpha")
+        .expect("write file");
+
+    Command::cargo_bin("media-importer")
+        .expect("binary exists")
+        .current_dir(temp.path())
+        .args(["--output", "human", "import", "--store", "store"])
+        .args(["--source", "source", "--db", "catalog.sqlite"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Blobs created: 1\n"));
+    Command::cargo_bin("media-importer")
+        .expect("binary exists")
+        .current_dir(temp.path())
+        .args(["--output", "human", "build-tree", "--store", "store"])
+        .args(["--browse-tree", "browse", "--db", "catalog.sqlite"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Links created: 1\n"));
+
+    assert_blob(temp.child("store").path(), "alpha", true);
+    assert!(temp.child("catalog.sqlite").path().is_file());
+    assert!(temp.child("browse").path().is_dir());
+}
+
+#[test]
 fn dry_run_existing_store_does_not_mutate_catalog_or_staging() {
     let temp = TempDir::new().expect("tempdir");
     let source = temp.child("source");
