@@ -55,6 +55,11 @@
               ];
             };
             cargoLock.lockFile = ./Cargo.lock;
+            # portable-pty starts PTY test children in $HOME, which Nix sets to
+            # a directory that does not exist.
+            preCheck = ''
+              export HOME=$(mktemp -d)
+            '';
             # These repository-policy tests read files outside the package
             # source; CI runs them.
             checkFlags = [
